@@ -111,6 +111,33 @@ Define the list of symbols you wish to scan:
 
 ## Usage
 
+### Live candlestick strategy dashboard
+
+The dashboard and alert scanner share the same KiteTicker connection, candle
+store and condition evaluator. Start it from the `kite` directory:
+
+```bash
+../.venv/bin/uvicorn dashboard:app --host 127.0.0.1 --port 8000
+```
+
+Open `http://127.0.0.1:8000`. The selected symbol receives live OHLC updates
+over the local WebSocket. The chart switches between every strategy timeframe:
+5-minute (EMA 20/50 and optional VWAP), 15-minute (Heikin-Ashi EMA 5/9),
+1-hour (EMA 9/50), and daily (EMA 9/50). Opening-range and previous-day levels
+are optional layers. Markers are confirmed only after a 5-minute rollover; the
+side panel shows the still-forming strategy state.
+
+Stop with one Ctrl+C. Shutdown drains active requests, stops Kite reconnects,
+closes the ticker on its reactor thread and cancels the session finalizer and
+pending dashboard broadcasts. Ticker/startup-thread cleanup waits are bounded.
+The split dashboard does not rebuild unused historical combined-score plots.
+Run shutdown regression checks from `kite` with
+`../.venv/bin/python -m unittest test_dashboard_shutdown.py test_live_dashboard.py`.
+
+Kite supplies exact live VWAP through `average_price`. Its historical candle API
+does not include VWAP, so pre-connection chart history uses a conventional
+OHLC-volume reconstruction and switches to Kite's exact value on live ticks.
+
 ### 1. Authentication
 To get a fresh access token (required daily by Zerodha), run the authentication script:
 ```bash
@@ -129,3 +156,30 @@ To verify parsing and indicator evaluations:
 ```bash
 python test_parser.py
 ```
+# Chart timestamp contract
+
+The dashboard uses two synchronized charts: candles and price overlays above,
+and strategy component studies below. Select ADX (14), OBV with EMA (5), or
+Range / 5×ATR on 5m; MACD on 15m; RSI on 1h/1D. The lower chart uses its own
+indicator units. Combined rule counts remain in the sidebar and confirmed
+signals remain on the candle chart. Panning and zooming synchronize both
+panels; missing values retain timestamp placeholders to preserve alignment.
+
+Validate the dashboard with `node kite/test_dashboard_ui.js`.
+
+Chart timestamps are Unix seconds representing the original candle start instant;
+the browser formats them explicitly in `Asia/Kolkata`, independently of its local
+timezone. Daily candles display their trading date rather than a midnight trading
+time. Historical API offsets are preserved when converting to market wall time.
+KiteTicker's host-local naive datetimes are normalized at the SDK callback boundary.
+No timestamp normalization changes OHLC values or aggregation rules.
+
+The normal NSE equity session is 09:15–15:30 IST. Regular-session final starts are
+15:25 (5m), 15:15 (15m), and 15:15 (1h); the final hourly interval is shortened
+by the session close. These are normal-session conventions, not a holiday or
+special-session calendar. Live candle construction excludes pre-open/post-close
+updates and rejects out-of-order exchange ticks. The dashboard finalizes the last
+observed candle at session close without constructing a synthetic candle; signals
+are stored once per candle. Restart after upgrading to clear old in-memory
+post-close candles and signals. Special trading sessions require an explicit
+exchange calendar before use; feed connectivity alone does not mean market open.

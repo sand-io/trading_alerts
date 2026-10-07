@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Kite Strategy Monitor</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2214%22 fill=%22%233d9df5%22/><path d=%22M17 14h9v15l14-15h12L35 32l18 18H40L26 35v15h-9z%22 fill=%22white%22/></svg>">
+  <script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
+  <style>
+    :root{color-scheme:dark;--bg:#080d14;--top:#0d141e;--panel:#101925;--panel2:#131f2d;--border:#223246;--grid:#172332;--text:#e7edf5;--muted:#8b9bae;--subtle:#627287;--green:#24c59a;--red:#f15b70;--blue:#3d9df5;--amber:#f2b84b;--violet:#a78bfa}
+    *{box-sizing:border-box}html,body{height:100%}body{margin:0;overflow:hidden;background:var(--bg);color:var(--text);font:13px Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+    button,select{font:inherit}header{height:58px;padding:0 16px;display:flex;align-items:center;gap:12px;background:var(--top);border-bottom:1px solid var(--border)}
+    .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px;white-space:nowrap}.brand-mark{display:grid;place-items:center;width:29px;height:29px;border-radius:8px;background:linear-gradient(145deg,#2a9df4,#7168e8);box-shadow:0 6px 20px #1675bd40}
+    .connection{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:12px;white-space:nowrap}.dot{width:7px;height:7px;border-radius:50%;background:#6c7888}.connection.connected .dot{background:var(--green);box-shadow:0 0 0 4px #24c59a18}.connection.error .dot{background:var(--red);box-shadow:0 0 0 4px #f15b7018}.connection.connecting .dot{background:var(--amber)}
+    .spacer{flex:1}.selector{min-width:230px;padding:8px 34px 8px 11px;color:var(--text);background:var(--panel);border:1px solid var(--border);border-radius:7px;outline:none}.selector:focus{border-color:#3d7fb7}
+    .icon-btn{height:34px;padding:0 11px;color:var(--muted);background:var(--panel);border:1px solid var(--border);border-radius:7px;cursor:pointer}.icon-btn:hover{color:var(--text);background:var(--panel2)}
+    .workspace{display:grid;grid-template-columns:minmax(0,1fr) 410px;height:calc(100vh - 58px)}.chart-panel{position:relative;min-width:0;display:flex;flex-direction:column}.toolbar{height:43px;display:flex;align-items:center;gap:7px;padding:0 12px;border-bottom:1px solid var(--border);background:#0b121b}
+    .tf-group{display:flex;padding:2px;background:#101b27;border:1px solid var(--border);border-radius:6px}.tf-btn{padding:3px 8px;border:0;border-radius:4px;background:transparent;color:var(--muted);cursor:pointer;font-size:11px}.tf-btn:hover{color:var(--text)}.tf-btn.active{background:#26394d;color:#fff}.threshold{padding:4px 8px;border-radius:5px;background:#281f38;color:#c8b7ed;font-weight:500;font-size:12px}.divider{width:1px;height:20px;background:var(--border);margin:0 3px}
+    .indicator-chip{display:flex;align-items:center;gap:6px;padding:5px 8px;border:0;border-radius:5px;background:transparent;color:var(--muted);cursor:pointer}.indicator-chip:hover{background:#162231;color:var(--text)}.indicator-chip.off{opacity:.38;text-decoration:line-through}.swatch{width:15px;height:2px;border-radius:2px}.chip-value{font-variant-numeric:tabular-nums;color:#c9d5e3;font-size:11px;min-width:48px;text-align:right}
+    .ohlc{margin-left:auto;display:flex;gap:9px;color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}.ohlc b{color:#c9d5e3;font-weight:600}.up{color:var(--green)!important}.down{color:var(--red)!important}
+    #chart{flex:1;min-height:330px}.study-values{color:var(--muted);font-size:10px}.study-values span{font-variant-numeric:tabular-nums}.chart-watermark{position:absolute;left:18px;bottom:35px;pointer-events:none;color:#ffffff0b;font-size:64px;font-weight:800;letter-spacing:-3px}
+    .sidebar{overflow:auto;border-left:1px solid var(--border);background:var(--top);padding:14px;scrollbar-width:thin;scrollbar-color:#314156 transparent}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:11px}.metric{padding:10px 11px;background:var(--panel);border:1px solid var(--border);border-radius:9px}.metric label{display:block;margin-bottom:5px;color:var(--subtle);font-size:10px;letter-spacing:.55px}.metric strong{font-size:14px;font-variant-numeric:tabular-nums}
+    .card{margin-bottom:11px;overflow:hidden;background:var(--panel);border:1px solid var(--border);border-radius:10px}.card-head{display:flex;align-items:center;justify-content:space-between;padding:11px 12px;border-bottom:1px solid var(--border);font-weight:700}.side-title{display:flex;align-items:center;gap:7px}.score{color:var(--muted);font-weight:600;font-variant-numeric:tabular-nums}
+    .rules{padding:3px 11px}.rule{display:grid;grid-template-columns:17px 1fr auto;gap:7px;align-items:start;padding:7px 0;border-bottom:1px solid #1c2a3a;font-size:11.5px;line-height:1.38}.rule:last-child{border-bottom:0}.rule-state{font-weight:800}.pass{color:var(--green)}.fail{color:var(--red)}.tf-badge{padding:2px 5px;border-radius:4px;background:#19283a;color:#8095ab;font-size:9px;white-space:nowrap}
+    .guide{padding:4px 12px 11px}.guide-section{padding:10px 0 3px;color:var(--subtle);font-size:9px;font-weight:750;letter-spacing:.8px}.guide-row{padding:9px 0;border-bottom:1px solid #1c2a3a}.guide-row:last-child{border:0}.guide-name{display:flex;align-items:center;gap:7px;margin-bottom:4px;font-weight:650;font-size:11.5px}.guide p{margin:0;color:var(--muted);font-size:10.5px;line-height:1.45}.calc-tag{display:inline-grid;place-items:center;min-width:34px;height:17px;padding:0 5px;border-radius:4px;background:#1b2b3b;color:#a9bbce;font-size:8px;font-weight:750}.note{padding:10px 12px;background:#101d29;color:var(--muted);font-size:10.5px;line-height:1.5;border-top:1px solid var(--border)}
+    .empty{padding:14px;color:var(--muted);font-size:11px}.error-text{color:#ff9bab}
+    .strategy-title{display:flex;justify-content:space-between;font-weight:650;margin:10px 0 8px}.strategy-context{font-size:10px;color:var(--muted);line-height:1.5;margin-bottom:8px}.strategy-scores{display:flex;gap:15px;margin-bottom:8px;font-size:11px}.study-readouts{display:grid;gap:6px}.study-readout{display:flex;justify-content:space-between;gap:10px;font-size:11px;font-variant-numeric:tabular-nums}.toolbar{overflow-x:auto;flex-shrink:0}
+    .study-panel{height:230px;min-height:170px;flex-shrink:0;border-top:1px solid var(--border);display:flex;flex-direction:column}.study-toolbar{display:flex;align-items:center;gap:10px;padding:6px 12px;background:var(--top);font-size:11px}.study-toolbar select{background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px}#studyChart{flex:1;min-height:0}#studyLegend{margin-left:auto;color:var(--muted);font-variant-numeric:tabular-nums}
+    @media(max-width:1050px){.workspace{grid-template-columns:minmax(0,1fr) 350px}.ohlc{display:none}.selector{min-width:180px}}@media(max-width:780px){body{overflow:auto}.workspace{display:block;height:auto}.chart-panel{height:68vh}.sidebar{border-left:0;border-top:1px solid var(--border)}header{position:sticky;top:0;z-index:5}.brand span{display:none}.indicator-chip .chip-value{display:none}}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand"><span class="brand-mark">K</span><span>Kite Strategy Monitor</span></div>
+    <div class="connection connecting" id="connection"><span class="dot"></span><span id="status">Starting market feed…</span></div>
+    <div class="spacer"></div>
+    <button class="icon-btn" id="resetView" title="Reset chart to the latest 65 candles">Reset view</button>
+    <button class="icon-btn" id="fullscreen" title="Open chart in fullscreen">Fullscreen</button>
+    <select class="selector" id="symbol" aria-label="Trading symbol"></select>
+  </header>
+  <main class="workspace">
+    <section class="chart-panel" id="chartPanel">
+      <div class="toolbar">
+        <div class="tf-group" aria-label="Chart timeframe"><button class="tf-btn active" data-timeframe="5m">5m</button><button class="tf-btn" data-timeframe="15m">15m</button><button class="tf-btn" data-timeframe="1h">1h</button><button class="tf-btn" data-timeframe="1d">1D</button></div>
+        <span class="threshold" title="Configured percentage of rules required to trigger a signal">Signal ≥ <b id="threshold">—</b></span><span class="divider"></span>
+        <div id="indicatorChips" style="display:flex;gap:3px"></div>
+        <button class="indicator-chip off" id="levelsToggle" title="Show or hide opening-range and previous-day levels"><span class="swatch" style="background:var(--green)"></span>Levels</button>
+        <div class="ohlc" id="ohlc"><span>O <b>—</b></span><span>H <b>—</b></span><span>L <b>—</b></span><span>C <b>—</b></span></div>
+      </div>
+      <div id="chart"></div>
+      <section class="study-panel">
+        <div class="study-toolbar"><strong>Strategy studies</strong><select id="studySelect" aria-label="Strategy study"></select><span id="studyLegend"></span></div>
+        <div id="studyChart"></div>
+      </section>
+      <div class="chart-watermark">KITE</div>
+    </section>
+    <aside class="sidebar">
+      <section class="card" id="strategyDetails">
+      <div class="guide">
+        <div class="strategy-title"><span>Kite strategy</span><span id="strategyTimeframe">5m</span></div>
+        <div class="strategy-context" id="strategyContext">Waiting for evaluation. Markers use the configured threshold, not necessarily all 14 rules.</div>
+        <div class="strategy-scores"><span class="pass" id="overlayBullScore">Bull —</span><span class="fail" id="overlayBearScore">Bear —</span></div>
+        <div class="study-values study-readouts" id="studyValues"></div>
+        <div class="strategy-context" style="margin:8px 0 0">Strategy studies use their own units in the lower panel. Choose ADX, OBV / EMA, or Range / 5×ATR on 5m; MACD on 15m; RSI on 1h / 1D. Full combined rule evaluations remain in the condition panels.</div>
+      </div>
+      </section>
+      <div class="metrics">
+        <div class="metric"><label>LAST PRICE</label><strong id="price">—</strong></div>
+        <div class="metric"><label>SESSION VWAP</label><strong id="vwapMetric">—</strong></div>
+        <div class="metric"><label>LAST UPDATE</label><strong id="updated">—</strong></div>
+      </div>
+      <section class="card"><div class="card-head"><span class="side-title pass">▲ Bullish conditions</span><span class="score" id="bullScore">0 / 14</span></div><div class="rules" id="bullRules"><div class="empty">Waiting for live evaluation…</div></div></section>
+      <section class="card"><div class="card-head"><span class="side-title fail">▼ Bearish conditions</span><span class="score" id="bearScore">0 / 14</span></div><div class="rules" id="bearRules"><div class="empty">Waiting for live evaluation…</div></div></section>
+      <section class="card">
+        <div class="card-head"><span>Indicator guide</span><span class="score">Chart key</span></div>
+        <div class="guide">
+          <div class="guide-section">VISIBLE CHART OVERLAYS</div>
+          <div class="guide-row"><div class="guide-name"><span class="swatch" style="background:var(--blue)"></span>Fast EMA</div><p>EMA 20 on 5m, Heikin-Ashi EMA 5 on 15m, and EMA 9 on 1h/1D.</p></div>
+          <div class="guide-row"><div class="guide-name"><span class="swatch" style="background:var(--amber)"></span>Slow EMA</div><p>EMA 50 on 5m/1h/1D and Heikin-Ashi EMA 9 on 15m.</p></div>
+          <div class="guide-row"><div class="guide-name"><span class="swatch" style="background:var(--violet)"></span>VWAP</div><p>Session volume-weighted average price. Exact Kite average price is used live; history is reconstructed from candle price and volume.</p></div>
+          <div class="guide-row"><div class="guide-name"><span class="swatch" style="background:var(--green)"></span>Opening 15m H/L</div><p>High and low of the first three 5-minute candles. These levels become final after 09:30 IST.</p></div>
+          <div class="guide-row"><div class="guide-name"><span class="swatch" style="background:#7c8da3"></span>Previous H/L</div><p>Previous completed trading day's high and low.</p></div>
+          <div class="guide-row"><div class="guide-name"><span class="pass">▲ BULL</span> / <span class="fail">▼ BEAR</span></div><p>Confirmed strategy state frozen when a 5-minute candle closes. Condition panels remain live while a candle forms.</p></div>
+          <div class="guide-section">STRATEGY CALCULATIONS</div>
+          <div class="guide-row"><div class="guide-name"><span class="calc-tag">ADX</span>Average Directional Index</div><p>Measures 5-minute trend strength. The strategy requires ADX(14) above 22 and rising.</p></div>
+          <div class="guide-row"><div class="guide-name"><span class="calc-tag">RSI</span>Relative Strength Index</div><p>Momentum filter evaluated on 1-hour and daily candles using period 14.</p></div>
+          <div class="guide-row"><div class="guide-name"><span class="calc-tag">MACD</span>Moving Average Convergence Divergence</div><p>15-minute MACD(12,26,9) line compared with its signal line.</p></div>
+          <div class="guide-row"><div class="guide-name"><span class="calc-tag">HA</span>Heikin-Ashi EMA</div><p>EMA(5) and EMA(9) calculated from 15-minute Heikin-Ashi closes.</p></div>
+          <div class="guide-row"><div class="guide-name"><span class="calc-tag">OBV</span>On-Balance Volume</div><p>5-minute cumulative volume direction compared with its EMA(5).</p></div>
+          <div class="guide-row"><div class="guide-name"><span class="calc-tag">ATR</span>Average True Range</div><p>The latest 10-candle high-low span must remain below five times 5-minute ATR(14).</p></div>
+          <div class="guide-row"><div class="guide-name"><span class="calc-tag">BODY</span>Candle body strength</div><p>Absolute body divided by full high-low range: above 60% bullish or 55% bearish.</p></div>
+          <div class="guide-row"><div class="guide-name"><span class="calc-tag">1D</span>Daily trend filters</div><p>Current daily close versus EMA(9), EMA(50), plus daily RSI(14).</p></div>
+        </div>
+        <div class="note">The chart opens in a clean 65-candle view. Select 5m, 15m, 1h or 1D above. Click any indicator—or Levels—to show or hide it. Hover over candles for exact values. All times are IST and label candle starts, not closes. Daily labels identify the trading date. The regular NSE session is 09:15–15:30; its final hourly candle starts at 15:15 and ends at 15:30.</div>
+      </section>
+    </aside>
+  </main>
+<script>
+const COLORS={bg:'#080d14',grid:'#172332',border:'#223246',text:'#8b9bae',green:'#24c59a',red:'#f15b70',blue:'#3d9df5',amber:'#f2b84b',violet:'#a78bfa'};
+const chartHost=document.getElementById('chart');
+const istDateTime=new Intl.DateTimeFormat('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',hour12:false});
+const istTime=new Intl.DateTimeFormat('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});
+const istDate=new Intl.DateTimeFormat('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short'});
+function chartDate(time){
+  if(typeof time==='number')return new Date(time*1000);
+  if(typeof time==='string')return new Date(time+'T00:00:00+05:30');
+  return new Date(`${time.year}-${String(time.month).padStart(2,'0')}-${String(time.day).padStart(2,'0')}T00:00:00+05:30`);
+}
+const istFullDate=new Intl.DateTimeFormat('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short',year:'numeric'});
+const istYear=new Intl.DateTimeFormat('en-IN',{timeZone:'Asia/Kolkata',year:'numeric'});
+const istMonth=new Intl.DateTimeFormat('en-IN',{timeZone:'Asia/Kolkata',month:'short',year:'numeric'});
+function formatChartTime(time){return (currentTimeframe==='1d'?istFullDate:istDateTime).format(chartDate(time))+' IST'}
+function formatAxisTime(time,type){
+  const date=chartDate(time);
+  if(type===0)return istYear.format(date);
+  if(type===1)return istMonth.format(date);
+  return type===2?istDate.format(date):istTime.format(date);
+}
+const chart=LightweightCharts.createChart(chartHost,{layout:{background:{color:COLORS.bg},textColor:COLORS.text,fontFamily:'Inter, system-ui, sans-serif'},localization:{timeFormatter:formatChartTime},grid:{vertLines:{color:COLORS.grid},horzLines:{color:COLORS.grid}},crosshair:{mode:LightweightCharts.CrosshairMode.Normal},leftPriceScale:{visible:false,borderColor:COLORS.border,entireTextOnly:true},rightPriceScale:{borderColor:COLORS.border,autoScale:true,scaleMargins:{top:.1,bottom:.12}},timeScale:{timeVisible:true,secondsVisible:false,borderColor:COLORS.border,rightOffset:7,barSpacing:8,minBarSpacing:4,fixLeftEdge:true,fixRightEdge:false,rightBarStaysOnScroll:true,shiftVisibleRangeOnNewBar:true,tickMarkFormatter:formatAxisTime},handleScroll:{mouseWheel:true,pressedMouseMove:true,horzTouchDrag:true,vertTouchDrag:false},handleScale:{axisPressedMouseMove:true,mouseWheel:true,pinch:true}});
+// Add the score plots first so candles and price overlays remain visually dominant.
+const studyHost=document.getElementById('studyChart');
+const studyChart=LightweightCharts.createChart(studyHost,{layout:{background:{color:COLORS.bg},textColor:COLORS.text},localization:{timeFormatter:formatChartTime},grid:{vertLines:{color:COLORS.grid},horzLines:{color:COLORS.grid}},rightPriceScale:{minimumWidth:70,borderColor:COLORS.border,scaleMargins:{top:.15,bottom:.15}},timeScale:{timeVisible:true,secondsVisible:false,rightOffset:7,barSpacing:8,minBarSpacing:4,tickMarkFormatter:formatAxisTime,borderColor:COLORS.border},handleScroll:{mouseWheel:true,pressedMouseMove:true},handleScale:{mouseWheel:true,pinch:true}});
+const studySeries=new Map();let selectedStudy=null,syncingRange=false;
+function syncRange(source,target){source.timeScale().subscribeVisibleLogicalRangeChange(range=>{if(syncingRange||!range)return;syncingRange=true;try{target.timeScale().setVisibleLogicalRange(range)}finally{syncingRange=false}})}
+syncRange(chart,studyChart);syncRange(studyChart,chart);
+new ResizeObserver(entries=>{const box=entries[0].contentRect;studyChart.applyOptions({width:box.width,height:box.height})}).observe(studyHost);
+const candles=chart.addCandlestickSeries({upColor:COLORS.green,downColor:COLORS.red,wickUpColor:COLORS.green,wickDownColor:COLORS.red,borderVisible:false,priceFormat:{type:'custom',minMove:.01,formatter:fmt},priceLineVisible:true,lastValueVisible:true});
+const statusEl=document.getElementById('status'),connectionEl=document.getElementById('connection'),symbolSelect=document.getElementById('symbol');
+let socket=null,heartbeat=null,reconnectTimer=null,currentToken=null,currentTimeframe='5m',priceLines=[],signalMarkers=[],candleData=[],currentLevels={},levelsVisible=false,loadingSnapshot=false;
+const overlaySeries=new Map(),overlaySpecs=new Map(),studySpecs=new Map();
+new ResizeObserver(entries=>{const box=entries[0].contentRect;chart.applyOptions({width:box.width,height:box.height})}).observe(chartHost);
+function fmt(value){const n=Number(value);return Number.isFinite(n)&&n>0?n.toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2}):'—'}
+let feedStatus='initializing',feedError=null;
+function setStatus(status,error){feedStatus=status;feedError=error;connectionEl.className='connection '+(status==='connected'?'connected':status==='error'||status==='disconnected'?'error':'connecting');const parts=new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date());const minutes=Number(parts.find(p=>p.type==='hour').value)*60+Number(parts.find(p=>p.type==='minute').value);const outside=minutes<555||minutes>=930;const labels={initializing:'Initializing scanner…',connecting:'Connecting to Kite…',connected:outside?'Feed connected · outside regular hours':'Kite feed connected',reconnecting:'Reconnecting to Kite…',disconnected:'Kite disconnected',error:'Kite connection error'};statusEl.textContent=error&&String(error).includes('403')?'Kite authentication failed — refresh token':(labels[status]||status);statusEl.title=error||'Feed connectivity is separate from exchange trading status; regular hours are 09:15–15:30 IST.'}
+setInterval(()=>setStatus(feedStatus,feedError),20000);
+function timeframe(text){const match=text.match(/^(\d+)\s*-?\s*(minute|hour|day)/i);return match?match[1]+({minute:'m',hour:'h',day:'D'}[match[2].toLowerCase()]||''):'5m'}
+function renderSide(prefix,result){if(!result)return;document.getElementById(prefix+'Score').textContent=`${result.passed} / ${result.total} (${result.percentage.toFixed(1)}%)`;const root=document.getElementById(prefix+'Rules');root.replaceChildren();for(const rule of result.rules){const row=document.createElement('div');row.className='rule';const state=document.createElement('span');state.className='rule-state '+(rule.passed?'pass':'fail');state.textContent=rule.passed?'✓':'×';const label=document.createElement('span');label.textContent=rule.text;if(rule.error){label.className='error-text';label.title=rule.error}const badge=document.createElement('span');badge.className='tf-badge';badge.textContent=timeframe(rule.text);row.append(state,label,badge);root.append(row)}}
+function ema(values,period){if(values.length<period)return null;const k=2/(period+1);let value=values.slice(0,period).reduce((a,b)=>a+b,0)/period;for(let i=period;i<values.length;i++)value=values[i]*k+value*(1-k);return value}
+function applyLevels(levels){currentLevels=levels||{};priceLines.forEach(line=>candles.removePriceLine(line));priceLines=[];if(!levelsVisible)return;const defs=[['opening_high','Opening 15m H',COLORS.green],['opening_low','Opening 15m L',COLORS.green],['previous_high','Previous H','#7c8da3'],['previous_low','Previous L','#7c8da3']];for(const [key,title,color] of defs){const price=Number(currentLevels[key]);if(Number.isFinite(price)&&price>0)priceLines.push(candles.createPriceLine({price,color,lineWidth:1,lineStyle:2,axisLabelVisible:true,title}))}}
+function markers(signals){return uniqueMarkers(signals.flatMap(signal=>{const output=[];if(!signal.candle)return output;if(signal.bullish.triggered)output.push({time:signal.candle.time,position:'belowBar',color:COLORS.green,shape:'arrowUp',text:'BULL'});if(signal.bearish.triggered)output.push({time:signal.candle.time,position:'aboveBar',color:COLORS.red,shape:'arrowDown',text:'BEAR'});return output}))}
+function resetVisibleRange(){const count=candleData.length;if(!count)return;chart.timeScale().setVisibleLogicalRange({from:Math.max(0,count-65),to:count+5})}
+function renderLive(data){document.getElementById('price').textContent=fmt(data.price);document.getElementById('vwapMetric').textContent=fmt(data.vwap);document.getElementById('updated').textContent=data.evaluation_source==='historical'?'Historical':new Date(data.server_time).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',second:'2-digit'});renderSide('bull',data.bullish);renderSide('bear',data.bearish);document.getElementById('overlayBullScore').textContent=`Bull ${data.bullish.passed}/${data.bullish.total} (${data.bullish.percentage.toFixed(1)}%)`;document.getElementById('overlayBearScore').textContent=`Bear ${data.bearish.passed}/${data.bearish.total} (${data.bearish.percentage.toFixed(1)}%)`;document.getElementById('strategyContext').textContent=(data.evaluation_source==='historical'?'Historical snapshot · no new alerts. ':'Last received evaluation · may be provisional. ')+'Markers confirm 5m candles at the configured threshold; they do not imply all rules passed.'}
+function clearOverlays(){for(const line of overlaySeries.values())chart.removeSeries(line);overlaySeries.clear();overlaySpecs.clear();document.getElementById('indicatorChips').replaceChildren()}
+function configureOverlays(overlays){clearOverlays();for(const spec of overlays){const line=chart.addLineSeries({color:spec.color,lineWidth:2,priceFormat:{type:'custom',minMove:.01,formatter:fmt},priceLineVisible:false,lastValueVisible:false,crosshairMarkerRadius:3,visible:spec.default_visible});line.setData(spec.points.filter(point=>point.value>0));overlaySeries.set(spec.id,line);overlaySpecs.set(spec.id,spec);const button=document.createElement('button');button.className='indicator-chip'+(spec.default_visible?'':' off');button.title=`Toggle ${spec.label}`;button.innerHTML=`<span class="swatch" style="background:${spec.color}"></span>${spec.label} <span class="chip-value" id="${spec.id}Value">—</span>`;button.onclick=()=>{const hidden=button.classList.toggle('off');line.applyOptions({visible:!hidden})};document.getElementById('indicatorChips').append(button)}}
+function renderStudyReadouts(time){for(const spec of studySpecs.values())for(const line of spec.lines){const point=time==null?line.points.at(-1):line.points.find(p=>p.time===time);const node=document.getElementById('study-'+line.id);if(node)node.textContent=point&&Number.isFinite(point.value)?point.value.toLocaleString('en-IN',{maximumFractionDigits:2}):'—'}const spec=studySpecs.get(selectedStudy);document.getElementById('studyLegend').textContent=spec?spec.lines.map(line=>{const point=time==null?line.points.at(-1):line.points.find(p=>p.time===time);return line.label+' '+(Number.isFinite(point?.value)?point.value.toLocaleString('en-IN',{maximumFractionDigits:2}):'—')}).join(' · '):'No study data'}
+function uniqueMarkers(items){
+  const unique=new Map();
+  const available=new Set(candleData.map(c=>c.time));
+  for(const item of items)if(available.has(item.time))unique.set(`${item.time}:${item.shape}`,item);
+  return [...unique.values()].sort((a,b)=>a.time-b.time);
+}
+function validTimeRange(range){return range&&range.from!=null&&range.to!=null}
+function drawSelectedStudy(){
+ for(const series of studySeries.values())studyChart.removeSeries(series);studySeries.clear();
+ const spec=studySpecs.get(selectedStudy);if(!spec){renderStudyReadouts();return}
+ const timeline=candleData.map(c=>c.time);
+ for(const line of spec.lines){const values=new Map(line.points.map(p=>[p.time,p.value]));const series=studyChart.addLineSeries({color:line.color,lineWidth:2,priceLineVisible:false,priceFormat:{type:'custom',minMove:.01,formatter:value=>value.toLocaleString('en-IN',{maximumFractionDigits:2})}});
+ series.setData(timeline.map(time=>Number.isFinite(values.get(time))?{time,value:values.get(time)}:{time}));studySeries.set(line.id,series)}
+ const first=studySeries.values().next().value;for(const level of spec.levels||[])first?.createPriceLine({price:level.value,color:level.color,title:level.label,lineStyle:2,lineWidth:1,axisLabelVisible:true});
+ const range=chart.timeScale().getVisibleLogicalRange();if(range)studyChart.timeScale().setVisibleLogicalRange(range);renderStudyReadouts()
+}
+function configureStudies(studies){studySpecs.clear();const root=document.getElementById('studyValues');root.replaceChildren();document.getElementById('strategyTimeframe').textContent=currentTimeframe.toUpperCase();for(const spec of studies){studySpecs.set(spec.id,spec);for(const line of spec.lines){const row=document.createElement('div');row.className='study-readout';const label=document.createElement('span');label.textContent=line.label;label.style.color=line.color;const value=document.createElement('span');value.id='study-'+line.id;row.append(label,value);root.append(row)}}const select=document.getElementById('studySelect');select.replaceChildren(...studies.map(spec=>{const option=document.createElement('option');option.value=spec.id;option.textContent=spec.label;return option}));if(!studySpecs.has(selectedStudy))selectedStudy=studies.find(spec=>spec.default_visible)?.id||studies[0]?.id;select.value=selectedStudy||'';drawSelectedStudy()}
+let snapshotRequest=0;
+async function loadSnapshot(token){const request=++snapshotRequest,requestedTimeframe=currentTimeframe;loadingSnapshot=true;try{const response=await fetch(`/api/snapshot/${token}?timeframe=${requestedTimeframe}`);if(!response.ok)throw new Error(await response.text());const data=await response.json();if(request!==snapshotRequest||token!==currentToken||requestedTimeframe!==currentTimeframe)return;document.getElementById('threshold').textContent=`${Number(data.threshold).toFixed(0)}%`;candleData=data.candles;candles.setData(candleData);configureOverlays(data.overlays);configureStudies(data.studies);signalMarkers=currentTimeframe==='5m'?markers(data.signals):[];candles.setMarkers(signalMarkers);window.lastCandleTime=candleData.at(-1)?.time;applyLevels(data.levels);if(data.strategy)renderLive(data.strategy);resetVisibleRange()}finally{if(request===snapshotRequest)loadingSnapshot=false}}
+function updateCandle(data){if(loadingSnapshot||data.instrument_token!==currentToken)return;const candle=data.candles_by_timeframe?.[currentTimeframe];if(!candle||candle.time<window.lastCandleTime)return;const isCurrent=window.lastCandleTime===candle.time;candles.update(candle);if(isCurrent)candleData[candleData.length-1]=candle;else{candleData.push(candle);window.lastCandleTime=candle.time}for(const [id,spec] of overlaySpecs){const line=overlaySeries.get(id);if(spec.source==='vwap'){if(Number(data.vwap)>0)line.update({time:candle.time,value:Number(data.vwap)});continue}const values=candleData.map(item=>spec.source==='ha_close'?(item.open+item.high+item.low+item.close)/4:item.close);const value=ema(values,spec.period);if(value!==null)line.update({time:candle.time,value})}}
+function updateStudy(data){if(loadingSnapshot||data.instrument_token!==currentToken||data.study_values?.timeframe!==currentTimeframe)return;for(const study of data.study_values.studies){const spec=studySpecs.get(study.id);if(!spec)continue;for(const point of study.lines){const line=spec.lines.find(item=>item.id===point.id);if(!line||!Number.isFinite(point.value)||point.time<(line.points.at(-1)?.time??0))continue;if(line.points.at(-1)?.time===point.time)line.points[line.points.length-1]=point;else line.points.push(point);studySeries.get(point.id)?.update({time:point.time,value:point.value})}}renderStudyReadouts()}
+function connect(token){if(socket){socket.onclose=null;socket.onmessage=null;socket.close()};clearInterval(heartbeat);clearTimeout(reconnectTimer);const protocol=location.protocol==='https:'?'wss':'ws';socket=new WebSocket(`${protocol}://${location.host}/ws/${token}`);socket.onopen=()=>{socket.send(JSON.stringify({type:'set_timeframe',timeframe:currentTimeframe}));heartbeat=setInterval(()=>socket.readyState===1&&socket.send('ping'),20000)};socket.onclose=()=>{clearInterval(heartbeat);setStatus('reconnecting');reconnectTimer=setTimeout(()=>currentToken===token&&connect(token),2000)};socket.onerror=()=>setStatus('error','Local dashboard WebSocket failed');socket.onmessage=message=>{const data=JSON.parse(message.data);if(data.type==='connection_status'){setStatus(data.status,data.error);return}if(loadingSnapshot||data.instrument_token!==currentToken)return;setStatus('connected');updateCandle(data);updateStudy(data);if(currentTimeframe==='5m'&&data.confirmed_signal){signalMarkers=uniqueMarkers([...signalMarkers,...markers([data.confirmed_signal])]);candles.setMarkers(signalMarkers)}renderLive(data)}}
+async function chooseSymbol(){const token=Number(symbolSelect.value);currentToken=token;if(socket){socket.onclose=null;socket.onmessage=null;socket.close()};await loadSnapshot(token);if(token===currentToken)connect(token)}
+async function loadSymbols(){for(let attempt=0;attempt<30;attempt++){const response=await fetch('/api/symbols');const symbols=await response.json();if(symbols.length){symbolSelect.replaceChildren(...symbols.map(item=>{const option=document.createElement('option');option.value=item.token;option.textContent=item.symbol;return option}));symbolSelect.onchange=()=>chooseSymbol().catch(error=>setStatus('error',error.message));await chooseSymbol();return}await new Promise(resolve=>setTimeout(resolve,Math.min(1000+attempt*250,3000)))}throw new Error('Scanner did not resolve any symbols')}
+document.querySelectorAll('.tf-btn').forEach(button=>button.onclick=async()=>{if(button.dataset.timeframe===currentTimeframe)return;currentTimeframe=button.dataset.timeframe;document.querySelectorAll('.tf-btn').forEach(item=>item.classList.toggle('active',item===button));if(socket?.readyState===1)socket.send(JSON.stringify({type:'set_timeframe',timeframe:currentTimeframe}));await loadSnapshot(currentToken)});
+document.getElementById('levelsToggle').onclick=event=>{levelsVisible=!levelsVisible;event.currentTarget.classList.toggle('off',!levelsVisible);applyLevels(currentLevels)};
+document.getElementById('resetView').onclick=resetVisibleRange;document.getElementById('fullscreen').onclick=()=>document.getElementById('chartPanel').requestFullscreen?.();
+chart.subscribeCrosshairMove(param=>{if(!param.time||!param.seriesData)return;const candle=param.seriesData.get(candles);if(candle){const values=[candle.open,candle.high,candle.low,candle.close];document.querySelectorAll('#ohlc b').forEach((node,index)=>{node.textContent=fmt(values[index]);node.className=candle.close>=candle.open?'up':'down'})}for(const [id,line] of overlaySeries){const point=param.seriesData.get(line),value=document.getElementById(id+'Value');if(value)value.textContent=point?fmt(point.value):'—'}});
+document.getElementById('studySelect').onchange=event=>{selectedStudy=event.target.value;drawSelectedStudy()};
+studyChart.subscribeCrosshairMove(param=>renderStudyReadouts(param.time));
+chart.subscribeCrosshairMove(param=>renderStudyReadouts(param.time));
+loadSymbols().catch(error=>{connectionEl.className='connection error';statusEl.textContent='Chart initialization failed';statusEl.title=error.message;console.error('Dashboard initialization failed',error)});
+</script>
+</body>
+</html>
