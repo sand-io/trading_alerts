@@ -1,0 +1,14 @@
+{
+  "symbols": [
+    "MCX:GOLD26OCTFUT",
+    "MCX:CRUDEOIL26OCTFUT"
+  ],
+  "poll_seconds": 20,
+  "scan_delay_seconds": 5,
+  "history_days": 180,
+  "session_open": "09:00",
+  "session_close": "23:30",
+  "desktop_notifications": false,
+  "log_level": "INFO",
+  "state_file": ".state.json"
+}

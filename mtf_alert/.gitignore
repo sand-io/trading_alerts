@@ -1,0 +1,8 @@
+.env
+.state.json
+__pycache__/
+*.pyc
+backtest_data/
+backtest_data_oct_2026/
+backtest_alerts*.csv
+backtest_oct_2026_alerts.csv

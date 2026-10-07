@@ -1,0 +1,14 @@
+5-minute ADX (14) is greater than 22 and rising
+5-minute Close is less than First 15-minute Low (or Previous Day Low)
+1-hour RSI (14) is less than 45
+1-hour EMA (9) is below 1-hour EMA (50).
+15-minute MACD line (26,12,9) is below MACD signal line.
+15-minute EMA (5) of Heikin-Ashi Close is below EMA (9) of Heikin-Ashi Close.
+5-minute Close is below VWAP.
+5-minute EMA (20) is below 5-minute EMA (50).
+5-minute OBV is below its 5-minute EMA (5)
+Last 10-candle High–Low range is less than 5 × ATR (14)
+Absolute candle body size (Open − Close) is greater than 55% of the candle’s High–Low range
+1 day Close is less than 1 day EMA (50)
+1 day Close is less than 1 day EMA (9)
+1 day RSI (14) is less than 45

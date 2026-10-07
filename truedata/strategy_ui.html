@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Strategy Builder</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f0f14; color: #e0e0e0; }
+  .header { background: #1a1a2e; padding: 16px 24px; border-bottom: 1px solid #2a2a3e; display: flex; align-items: center; gap: 12px; }
+  .header h1 { font-size: 18px; font-weight: 600; color: #fff; }
+  .header .badge { background: #7c3aed; color: #fff; font-size: 11px; padding: 2px 8px; border-radius: 10px; }
+  .tabs { display: flex; background: #1a1a2e; border-bottom: 1px solid #2a2a3e; }
+  .tab { padding: 12px 24px; cursor: pointer; font-size: 14px; color: #888; border-bottom: 2px solid transparent; }
+  .tab.active { color: #7c3aed; border-bottom-color: #7c3aed; }
+  .container { max-width: 960px; margin: 0 auto; padding: 24px; }
+  .card { background: #1a1a2e; border: 1px solid #2a2a3e; border-radius: 10px; padding: 20px; margin-bottom: 16px; }
+  .card h2 { font-size: 15px; font-weight: 600; margin-bottom: 16px; color: #fff; }
+  label { font-size: 13px; color: #aaa; display: block; margin-bottom: 4px; }
+  input, select, textarea { width: 100%; background: #0f0f14; border: 1px solid #2a2a3e; border-radius: 6px; padding: 8px 12px; color: #e0e0e0; font-size: 13px; outline: none; }
+  input:focus, select:focus { border-color: #7c3aed; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+  .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+  .btn { padding: 8px 16px; border-radius: 6px; border: none; cursor: pointer; font-size: 13px; font-weight: 500; }
+  .btn-primary { background: #7c3aed; color: #fff; }
+  .btn-primary:hover { background: #6d28d9; }
+  .btn-danger { background: #dc2626; color: #fff; }
+  .btn-danger:hover { background: #b91c1c; }
+  .btn-success { background: #059669; color: #fff; }
+  .btn-success:hover { background: #047857; }
+  .btn-outline { background: transparent; border: 1px solid #2a2a3e; color: #aaa; }
+  .btn-outline:hover { border-color: #7c3aed; color: #7c3aed; }
+  .condition-row { display: grid; grid-template-columns: 130px 120px 100px 100px 120px 100px 36px; gap: 6px; align-items: center; margin-bottom: 8px; background: #0f0f14; padding: 10px; border-radius: 8px; border: 1px solid #2a2a3e; }
+  .condition-row select, .condition-row input { font-size: 12px; padding: 6px 8px; }
+  .add-condition { border: 1px dashed #2a2a3e; border-radius: 8px; padding: 10px; text-align: center; cursor: pointer; color: #555; font-size: 13px; margin-bottom: 12px; }
+  .add-condition:hover { border-color: #7c3aed; color: #7c3aed; }
+  .strategy-list-item { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border: 1px solid #2a2a3e; border-radius: 8px; margin-bottom: 8px; cursor: pointer; }
+  .strategy-list-item:hover { border-color: #7c3aed; }
+  .strategy-list-item .name { font-weight: 500; font-size: 14px; }
+  .strategy-list-item .meta { font-size: 12px; color: #666; margin-top: 2px; }
+  .badge-bull { background: #064e3b; color: #6ee7b7; padding: 2px 8px; border-radius: 10px; font-size: 11px; }
+  .badge-bear { background: #450a0a; color: #fca5a5; padding: 2px 8px; border-radius: 10px; font-size: 11px; }
+  .badge-custom { background: #1e1b4b; color: #a5b4fc; padding: 2px 8px; border-radius: 10px; font-size: 11px; }
+  .actions { display: flex; gap: 8px; }
+  .alert-item { padding: 12px 16px; border-left: 3px solid #7c3aed; background: #0f0f14; border-radius: 0 8px 8px 0; margin-bottom: 8px; }
+  .alert-item.bull { border-left-color: #10b981; }
+  .alert-item.bear { border-left-color: #ef4444; }
+  .result-row { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 4px 0; }
+  .pass { color: #10b981; } .fail { color: #ef4444; }
+  .score-bar { height: 4px; background: #2a2a3e; border-radius: 2px; margin: 8px 0; }
+  .score-fill { height: 100%; border-radius: 2px; background: #7c3aed; }
+  .ws-status { width: 8px; height: 8px; border-radius: 50%; background: #ef4444; display: inline-block; margin-right: 6px; }
+  .ws-status.connected { background: #10b981; }
+  select option { background: #1a1a2e; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>📊</div>
+  <h1>Strategy Builder</h1>
+  <span class="badge">LIVE</span>
+  <div style="margin-left:auto;display:flex;align-items:center;font-size:12px;color:#888">
+    <span class="ws-status" id="wsStatus"></span>
+    <span id="wsLabel">Connecting...</span>
+  </div>
+</div>
+
+<div class="tabs">
+  <div class="tab active" onclick="showTab('builder')">Strategy Builder</div>
+  <div class="tab" onclick="showTab('strategies')">My Strategies</div>
+  <div class="tab" onclick="showTab('alerts')">Live Alerts</div>
+</div>
+
+<!-- ── BUILDER TAB ── -->
+<div id="tab-builder" class="container">
+  <div class="card">
+    <h2>Strategy Details</h2>
+    <div class="row">
+      <div><label>Strategy Name</label><input id="stratName" placeholder="e.g. RSI Breakout"></div>
+      <div><label>Signal Type</label>
+        <select id="stratSignal">
+          <option value="BULLISH">Bullish</option>
+          <option value="BEARISH">Bearish</option>
+          <option value="CUSTOM">Custom</option>
+        </select>
+      </div>
+    </div>
+    <div class="row">
+      <div><label>Description</label><input id="stratDesc" placeholder="Optional description"></div>
+      <div><label>Execution Mode</label>
+        <select id="stratMode">
+          <option value="LIVE">Live Scanner (continuous)</option>
+          <option value="ONETIME">One-time Check</option>
+        </select>
+      </div>
+    </div>
+    <div class="row">
+      <div><label>Match Type</label>
+        <select id="stratMatch">
+          <option value="ALL">ALL conditions must pass</option>
+          <option value="ANY">ANY condition must pass</option>
+          <option value="THRESHOLD">Threshold % must pass</option>
+        </select>
+      </div>
+      <div><label>Threshold % (if Threshold mode)</label><input id="stratThreshold" type="number" value="70" min="1" max="100"></div>
+    </div>
+    <div><label>Symbols (comma-separated, e.g. NIFTY-I, RELIANCE-I)</label>
+      <div style="display:flex;gap:8px;align-items:center">
+    <input id="stratSymbols" placeholder="NIFTY-I, RELIANCE-I, TCS-I" style="flex:1">
+    <button class="btn btn-outline" onclick="selectAllSymbols()" style="white-space:nowrap">
+        ⚡ All Nifty 200
+    </button>
+</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Conditions</h2>
+    <div style="display:grid;grid-template-columns:130px 120px 100px 100px 120px 100px 36px;gap:6px;margin-bottom:8px;padding:0 10px;">
+      <span style="font-size:11px;color:#555">Timeframe</span>
+      <span style="font-size:11px;color:#555">Indicator</span>
+      <span style="font-size:11px;color:#555">Period/Param</span>
+      <span style="font-size:11px;color:#555">Condition</span>
+      <span style="font-size:11px;color:#555">Compare To</span>
+      <span style="font-size:11px;color:#555">Value/Period</span>
+      <span></span>
+    </div>
+    <div id="conditionRows"></div>
+    <div class="add-condition" onclick="addConditionRow()">+ Add Condition</div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-outline" onclick="clearForm()">Clear</button>
+      <button class="btn btn-success" onclick="saveStrategy()">💾 Save Strategy</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── STRATEGIES TAB ── -->
+<div id="tab-strategies" class="container" style="display:none">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+    <h2 style="font-size:16px;font-weight:600">My Strategies</h2>
+    <button class="btn btn-primary" onclick="showTab('builder')">+ New Strategy</button>
+  </div>
+  <div id="strategiesList"></div>
+</div>
+
+<!-- ── ALERTS TAB ── -->
+<div id="tab-alerts" class="container" style="display:none">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+    <h2 style="font-size:16px;font-weight:600">Live Alerts</h2>
+    <button class="btn btn-outline" onclick="loadAlerts()">Refresh</button>
+  </div>
+  <div id="liveAlerts" style="margin-bottom:16px"></div>
+  <h3 style="font-size:14px;margin-bottom:12px;color:#888">Alert History</h3>
+  <div id="alertHistory"></div>
+</div>
+
+<script>
+let catalog = { indicators: {}, timeframes: [], conditions: [] };
+let editingId = null;
+
+// ─── Init ────────────────────────────────────────────────────────────────────
+
+async function init() {
+  const res = await fetch('/api/catalog');
+  catalog = await res.json();
+  addConditionRow();
+  connectWS();
+}
+
+// ─── Tabs ────────────────────────────────────────────────────────────────────
+
+function showTab(name) {
+  ['builder','strategies','alerts'].forEach(t => {
+    document.getElementById('tab-'+t).style.display = t===name ? '' : 'none';
+    document.querySelectorAll('.tab')[['builder','strategies','alerts'].indexOf(t)].classList.toggle('active', t===name);
+  });
+  if (name === 'strategies') loadStrategies();
+  if (name === 'alerts') loadAlerts();
+}
+
+// ─── Condition Row ───────────────────────────────────────────────────────────
+
+function addConditionRow(cond = null) {
+  const id = Date.now();
+  const row = document.createElement('div');
+  row.className = 'condition-row';
+  row.id = 'cond_' + id;
+
+  const tfs = catalog.timeframes.map(t => `<option value="${t}" ${cond?.timeframe===t?'selected':''}>${t}</option>`).join('');
+  const inds = Object.entries(catalog.indicators).map(([k,v]) => `<option value="${k}" ${cond?.indicator===k?'selected':''}>${v.label}</option>`).join('');
+  const conds = catalog.conditions.map(c => `<option value="${c.value}" ${cond?.condition===c.value?'selected':''}>${c.label}</option>`).join('');
+
+  row.innerHTML = `
+    <select onchange="updateCompareOptions('${id}', this.value)">${tfs}</select>
+    <select id="ind_${id}" onchange="updateCompareOptions('${id}', document.getElementById('tf_${id}').value)">${inds}</select>
+    <input placeholder="e.g. 14" value="${cond?.indicator_param||''}" id="indp_${id}">
+    <select>${conds}</select>
+    <select id="cmp_${id}">${getCompareOptions(cond?.indicator || Object.keys(catalog.indicators)[0], cond?.compare_to)}</select>
+    <input placeholder="e.g. 60" value="${cond?.compare_param||''}" id="cmpp_${id}">
+    <button class="btn btn-danger" style="padding:6px;font-size:11px" onclick="document.getElementById('cond_${id}').remove()">✕</button>
+  `;
+  // Fix: set id on tf select
+  row.querySelector('select').id = 'tf_' + id;
+  document.getElementById('conditionRows').appendChild(row);
+}
+
+function getCompareOptions(indicatorKey, selected = null) {
+  const ind = catalog.indicators[indicatorKey];
+  if (!ind) return '';
+  return (ind.compare_to || []).map(c => `<option value="${c}" ${selected===c?'selected':''}>${c}</option>`).join('');
+}
+
+function updateCompareOptions(id, tf) {
+  const indKey = document.getElementById('ind_' + id)?.value;
+  const sel = document.getElementById('cmp_' + id);
+  if (sel && indKey) sel.innerHTML = getCompareOptions(indKey);
+}
+
+// ─── Save Strategy ───────────────────────────────────────────────────────────
+
+async function saveStrategy() {
+  const conditions = [];
+  document.querySelectorAll('.condition-row').forEach(row => {
+    const selects = row.querySelectorAll('select');
+    const inputs  = row.querySelectorAll('input');
+    if (selects.length >= 3) {
+      conditions.push({
+        timeframe:       selects[0].value,
+        indicator:       selects[1].value,
+        indicator_param: inputs[0]?.value || '',
+        condition:       selects[2].value,
+        compare_to:      selects[3]?.value || 'VALUE',
+        compare_param:   inputs[1]?.value || '',
+      });
+    }
+  });
+
+  if (!document.getElementById('stratName').value.trim()) { alert('Enter a strategy name'); return; }
+  if (conditions.length === 0) { alert('Add at least one condition'); return; }
+
+  const symbols = document.getElementById('stratSymbols').value
+    .split(',').map(s => s.trim()).filter(Boolean);
+  if (symbols.length === 0) { alert('Enter at least one symbol'); return; }
+
+  const body = {
+    name:          document.getElementById('stratName').value.trim(),
+    description:   document.getElementById('stratDesc').value.trim(),
+    signal_type:   document.getElementById('stratSignal').value,
+    conditions,
+    match_type:    document.getElementById('stratMatch').value,
+    symbols,
+    mode:          document.getElementById('stratMode').value,
+    threshold_pct: parseFloat(document.getElementById('stratThreshold').value) || 70,
+  };
+
+  let res;
+  if (editingId) {
+    res = await fetch(`/api/strategies/${editingId}`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  } else {
+    res = await fetch('/api/strategies', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  }
+
+  if (res.ok) {
+    alert(editingId ? 'Strategy updated!' : 'Strategy saved!');
+    editingId = null;
+    clearForm();
+    showTab('strategies');
+  } else {
+    const err = await res.json();
+    alert('Error: ' + JSON.stringify(err));
+  }
+}
+
+function clearForm() {
+  document.getElementById('stratName').value = '';
+  document.getElementById('stratDesc').value = '';
+  document.getElementById('stratSymbols').value = '';
+  document.getElementById('conditionRows').innerHTML = '';
+  editingId = null;
+  addConditionRow();
+}
+
+// ─── Load Strategies ─────────────────────────────────────────────────────────
+
+async function loadStrategies() {
+  const res = await fetch('/api/strategies');
+  const list = await res.json();
+  const el = document.getElementById('strategiesList');
+  if (list.length === 0) { el.innerHTML = '<p style="color:#555;text-align:center;padding:40px">No strategies yet. Create one!</p>'; return; }
+  el.innerHTML = list.map(s => `
+    <div class="strategy-list-item">
+      <div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="name">${s.name}</span>
+          <span class="${s.signal_type==='BULLISH'?'badge-bull':s.signal_type==='BEARISH'?'badge-bear':'badge-custom'}">${s.signal_type}</span>
+          ${s.is_active ? '<span style="color:#10b981;font-size:11px">● ACTIVE</span>' : '<span style="color:#555;font-size:11px">● INACTIVE</span>'}
+        </div>
+        <div class="meta">${s.conditions.length} conditions · ${s.match_type} · ${s.symbols.join(', ')} · ${s.mode}</div>
+      </div>
+      <div class="actions">
+        <button class="btn btn-outline" onclick="runStrategy(${s.id})">▶ Run Now</button>
+        <button class="btn btn-outline" onclick="editStrategy(${s.id})">✏ Edit</button>
+        <button class="btn btn-danger" onclick="deleteStrat(${s.id})">✕</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function editStrategy(id) {
+  const s = await (await fetch(`/api/strategies/${id}`)).json();
+  editingId = id;
+  document.getElementById('stratName').value = s.name;
+  document.getElementById('stratDesc').value = s.description;
+  document.getElementById('stratSignal').value = s.signal_type;
+  document.getElementById('stratMode').value = s.mode;
+  document.getElementById('stratMatch').value = s.match_type;
+  document.getElementById('stratThreshold').value = s.threshold_pct;
+  document.getElementById('stratSymbols').value = s.symbols.join(', ');
+  document.getElementById('conditionRows').innerHTML = '';
+  s.conditions.forEach(c => addConditionRow(c));
+  showTab('builder');
+}
+
+async function deleteStrat(id) {
+  if (!confirm('Delete this strategy?')) return;
+  await fetch(`/api/strategies/${id}`, { method: 'DELETE' });
+  loadStrategies();
+}
+
+async function runStrategy(id) {
+  const btn = event.target;
+  btn.textContent = 'Running...';
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/strategies/${id}/run`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) { alert(data.detail || 'Error running strategy'); return; }
+    showRunResult(data);
+  } finally {
+    btn.textContent = '▶ Run Now';
+    btn.disabled = false;
+  }
+}
+
+function showRunResult(data) {
+  const html = data.results.map(r => {
+    if (r.error) return `<div class="alert-item"><b>${r.symbol}</b>: ${r.error}</div>`;
+    const bar = `<div class="score-bar"><div class="score-fill" style="width:${r.score_pct}%"></div></div>`;
+    const passed = r.passed.map(p => `<div class="result-row pass">✅ ${p.reason}</div>`).join('');
+    const failed = r.failed.map(p => `<div class="result-row fail">❌ ${p.reason}</div>`).join('');
+    return `<div class="alert-item ${r.triggered?'bull':''}">
+      <b>${r.symbol}</b> — ${r.passed_count}/${r.total} passed (${r.score_pct}%) ${r.triggered ? '🚀 TRIGGERED' : ''}
+      ${bar}${passed}${failed}
+    </div>`;
+  }).join('');
+  showModal(data.strategy, html);
+}
+
+// ─── Alerts ──────────────────────────────────────────────────────────────────
+
+async function loadAlerts() {
+  const res = await fetch('/api/alerts?limit=20');
+  const list = await res.json();
+  const el = document.getElementById('alertHistory');
+  if (list.length === 0) { el.innerHTML = '<p style="color:#555;text-align:center;padding:20px">No alerts yet</p>'; return; }
+  el.innerHTML = list.map(a => `
+    <div class="alert-item ${a.signal_type==='BULLISH'?'bull':'bear'}">
+      <div style="display:flex;justify-content:space-between">
+        <b>${a.symbol}</b>
+        <span style="color:#555;font-size:11px">${new Date(a.triggered_at).toLocaleString()}</span>
+      </div>
+      <div style="font-size:12px;color:#aaa">${a.signal_type} · ${a.score_pct}% · Strategy #${a.strategy_id}</div>
+    </div>
+  `).join('');
+}
+
+async function selectAllSymbols() {
+    const res = await fetch('/api/symbols');
+    const data = await res.json();
+    document.getElementById('stratSymbols').value = data.symbols.join(', ');
+
+    // Visual feedback
+    const btn = event.target;
+    btn.textContent = `✅ ${data.symbols.length} symbols selected`;
+    btn.style.borderColor = '#10b981';
+    btn.style.color = '#10b981';
+    setTimeout(() => {
+        btn.textContent = '⚡ All Nifty 200';
+        btn.style.borderColor = '';
+        btn.style.color = '';
+    }, 2000);
+}
+
+// ─── WebSocket ───────────────────────────────────────────────────────────────
+
+function connectWS() {
+  const ws = new WebSocket(`ws://${location.host}/ws/alerts`);
+  ws.onopen = () => {
+    document.getElementById('wsStatus').className = 'ws-status connected';
+    document.getElementById('wsLabel').textContent = 'Live';
+  };
+  ws.onclose = () => {
+    document.getElementById('wsStatus').className = 'ws-status';
+    document.getElementById('wsLabel').textContent = 'Disconnected';
+    setTimeout(connectWS, 3000);
+  };
+  ws.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    if (data.type === 'ping') return;
+    const el = document.getElementById('liveAlerts');
+    const div = document.createElement('div');
+    div.className = `alert-item ${data.signal_type==='BULLISH'?'bull':'bear'}`;
+    div.innerHTML = `<b>${data.symbol}</b> — ${data.strategy_name} · ${data.score_pct}% <span style="color:#555;font-size:11px;float:right">${new Date().toLocaleTimeString()}</span>`;
+    el.prepend(div);
+    if (el.children.length > 20) el.lastChild.remove();
+  };
+}
+
+// ─── Modal ───────────────────────────────────────────────────────────────────
+
+function showModal(title, content) {
+  const existing = document.getElementById('resultModal');
+  if (existing) existing.remove();
+
+  const m = document.createElement('div');
+  m.id = 'resultModal';
+  m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:100;display:flex;align-items:center;justify-content:center';
+
+  m.onclick = (e) => { if (e.target === m) m.remove(); };
+
+  m.innerHTML = `
+    <div style="background:#1a1a2e;border:1px solid #2a2a3e;border-radius:12px;padding:24px;max-width:600px;width:90%;max-height:80vh;overflow-y:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <h3 style="color:#fff">${title}</h3>
+        <button class="btn btn-outline" onclick="document.getElementById('resultModal').remove()">✕ Close</button>
+      </div>
+      ${content}
+    </div>`;
+
+  document.body.appendChild(m);
+
+  document.onkeydown = (e) => {
+    if (e.key === 'Escape') {
+      const mo = document.getElementById('resultModal');
+      if (mo) mo.remove();
+    }
+  };
+}
+
+init();
+</script>
+</body>
+</html>

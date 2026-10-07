@@ -1,0 +1,20 @@
+Bearish Setup Conditions
+
+5-minute ADX (14) is greater than 30
+Current 5-minute Low is lower than the first 5-minute Low.
+5-minute Close is less than or equal to the lowest Low of the last 18 candles.
+5 min close is less than yesterday's low
+4-hour Fast Stochastic %K (14,3) is less than Slow Stochastic %D (14,3).
+Current 4-hour Close is below 4-hour EMA (9).
+Previous 4-hour Close was also below 4-hour EMA (9).
+4-hour Close is below 4-hour EMA (50).
+1-hour RSI (14) is less than 40.
+1-hour EMA (9) is below 1-hour EMA (50).
+15-minute MACD line (26,12,9) is below MACD signal line.
+15-minute EMA (5) of Heikin-Ashi Close is below EMA (9) of Heikin-Ashi Close.
+5-minute Close is below VWAP.
+5-minute EMA (20) is below 5-minute EMA (50).
+5-minute OBV is below its 5-minute EMA (5).
+Absolute candle body size (|Open − Close|) is greater than 55% of the candle’s High–Low range.
+Last 10-candle High–Low range is less than 5 × ATR (14).
+current 5-minute volume is greater than average volume of last 20 candles

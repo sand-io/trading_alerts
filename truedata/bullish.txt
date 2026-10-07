@@ -1,0 +1,21 @@
+Bullish Setup Conditions
+
+5-minute ADX (14) is greater than 30
+5 min close greater than last 4 days close
+Current 5-minute High is higher than first 5-minute High.
+5-minute Close is greater than or equal to the highest High of last 18 candles.
+4-hour Fast Stochastic %K (14,3) is greater than Slow Stochastic %D (14,3).
+Current 4-hour Close is above 4-hour EMA (9).
+Previous 4-hour Close was also above 4-hour EMA (9).
+4-hour Close is above 4-hour EMA (50).
+1-hour RSI (14) is greater than 60.
+1-hour EMA (9) is above 1-hour EMA (50).
+15-minute MACD line (26,12,9) is above MACD signal line.
+15-minute EMA (5) of Heikin-Ashi Close is above EMA (9) of Heikin-Ashi Close.
+5-minute Close is above VWAP.
+5-minute EMA (20) is above 5-minute EMA (50).
+5-minute OBV is above its 5-minute EMA (5).
+Absolute candle body size (|Close − Open|) is greater than 55% of the candle’s High–Low range.
+Last 10-candle High–Low range is less than 5 × ATR (14)
+current 5-minute volume is greater than average volume of last 20 candles
+5 min close is greater than yesterday's high

@@ -1,0 +1,6 @@
+Instrument,Strategy,Direction,Entry Price,Target Price,Stop Loss,Signal Time,Why Signal Was Generated,Result,Result Time
+MCX:GOLD26DECFUT,fast,bearish,151700.0,152751.0,149598.0,24 Jun 2026 2:45 PM,15-min trend + 5-min EMA/RSI/VWAP + 3-min Heikin Ashi/EMA/MACD/OBV confirmation,target,24 Jun 2026 7:09 PM
+MCX:GOLD26DECFUT,fast,bearish,150200.0,150449.0,149702.0,10 Jul 2026 5:00 PM,15-min trend + 5-min EMA/RSI/VWAP + 3-min Heikin Ashi/EMA/MACD/OBV confirmation,target,10 Jul 2026 7:42 PM
+MCX:GOLD26DECFUT,fast,bullish,147443.0,147250.0,147829.0,22 Jul 2026 4:45 PM,15-min trend + 5-min EMA/RSI/VWAP + 3-min Heikin Ashi/EMA/MACD/OBV confirmation,stop,22 Jul 2026 5:12 PM
+MCX:GOLD26DECFUT,fast,bearish,145049.0,145288.0,144571.0,23 Jul 2026 11:15 PM,15-min trend + 5-min EMA/RSI/VWAP + 3-min Heikin Ashi/EMA/MACD/OBV confirmation,stop,24 Jul 2026 9:03 AM
+MCX:CRUDEOIL26OCTFUT,fast,bullish,7600.0,7429.0,7942.0,14 Jul 2026 1:00 PM,15-min trend + 5-min EMA/RSI/VWAP + 3-min Heikin Ashi/EMA/MACD/OBV confirmation,stop,14 Jul 2026 8:06 PM
