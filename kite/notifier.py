@@ -2,6 +2,7 @@ import json
 import os
 import time
 import platform
+import shutil
 import subprocess
 from datetime import datetime
 
@@ -78,6 +79,21 @@ class Notifier:
                     f'$toast.ShowBalloonTip(5000)'
                 )
                 subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True)
+
+            elif system == "Linux":
+                # notify-send is provided by libnotify on most desktop Linux
+                # distributions. Terminal alerts remain the fallback on a
+                # headless machine or when libnotify is not installed.
+                notify_send = shutil.which("notify-send")
+                if notify_send:
+                    subprocess.run([
+                        notify_send,
+                        "--app-name=Kite Strategy Monitor",
+                        "--urgency=critical",
+                        "--expire-time=10000",
+                        title,
+                        message,
+                    ], check=True, timeout=5)
         except Exception as e:
             print(f"  └─ Failed to send {system} notification: {e}")
 

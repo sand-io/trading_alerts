@@ -37,13 +37,15 @@ graph TD
    * The current forming candle is updated in real-time. The closing price is dynamically updated using the Last Traded Price (LTP), and the high/low values are adjusted if the LTP breaks the current range.
    * `4h` candles are resampled on-the-fly using `1h` candles.
 5. **Grouped Condition Evaluation:** 
-   * On every incoming tick, the scanner evaluates all active conditions from `bullish.txt` (or `bearish.txt`).
+   * Every incoming tick updates candle OHLC and volume on the ingestion worker. Live chart events are published at most once per second per symbol (and immediately at candle rollover).
+   * A separate worker evaluates private candle snapshots from `bullish.txt` and `bearish.txt`. Provisional evaluations for the same symbol/candle are combined; final snapshots from earlier candles are retained. The rule panel displays the evaluation timestamp separately from the latest market update.
+   * Desktop alerts are suppressed for evaluations more than ten seconds behind exchange time. The health endpoint reports pending tick batches and evaluations for monitoring processing load.
    * It counts the percentage of rules that evaluate to `True`.
 6. **Threshold-Based Alerts:** 
    * The scanner loads `ALERT_THRESHOLD` (e.g. `70` for 70%) from the `.env` file.
    * If the percentage of passing conditions $\ge$ `ALERT_THRESHOLD`, it triggers a grouped alert.
    * The alert lists exactly which conditions passed and the stock's current price.
-7. **Cooldown Filter:** The notifier applies a cooldown (e.g., 5 minutes) using a stable `cooldown_key` so that flickering condition counts do not cause alert spam.
+7. **Cooldown Filter:** The notifier applies a cooldown (e.g., 5 minutes) using a stable `cooldown_key` so that flickering condition counts do not cause alert spam. Desktop notifications use Notification Center on macOS, Windows notifications on Windows, and `notify-send`/libnotify on Linux; terminal output remains available when desktop notifications are unavailable.
 8. **Dynamic Configuration Reload:** Every 5 seconds, the scanner checks the modification timestamps of `bullish.txt`, `bearish.txt`, and `.env`. If files have changed, it reloads the conditions and `ALERT_THRESHOLD` on-the-fly without interrupting the live WebSocket connection.
 
 ---
@@ -56,6 +58,8 @@ graph TD
 * **`auth.py`**: Interactive script to authenticate with Kite Connect and retrieve the access token.
 * **`test_parser.py`**: Unit tests verifying rule parsing and logic evaluation.
 * **`config.json`**: List of symbols to track.
+* **`nifty200_futures_underlyings.json`**: The 200 PDF reference underlyings.
+* **`update_futures_symbols.py`**: Resolves those underlyings against Zerodha's live NFO instrument master and replaces `config.json` with exact near-month futures contracts. Run it after each monthly rollover.
 * **`bullish.txt` / `bearish.txt`**: Plaintext files containing conditions to trigger alerts.
 
 ---

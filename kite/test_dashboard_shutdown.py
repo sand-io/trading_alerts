@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 import unittest
+import queue
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -19,11 +20,50 @@ from scanner import RealtimeScanner
 
 
 class TestScannerStop(unittest.TestCase):
+    def test_worker_survives_bad_tick_without_changing_connection_state(self):
+        scanner = self.scanner()
+        scanner.connection_status = 'connected'
+        scanner._process_lock = threading.RLock()
+        scanner._process_tick_locked = Mock(side_effect=[ValueError('bad tick'), None])
+        scanner._tick_queue.put([{'instrument_token': 1}, {'instrument_token': 2}])
+        scanner._tick_queue.put(None)
+        scanner._process_tick_queue()
+        self.assertEqual(scanner._process_tick_locked.call_count, 2)
+        self.assertEqual(scanner.connection_status, 'connected')
+        self.assertEqual(scanner.processing_error, 'bad tick')
+
+    def test_throttled_evaluation_still_updates_candles_and_evaluates_rollover(self):
+        scanner = self.scanner()
+        data = Mock()
+        data._latest_exchange_time = None
+        data.add_tick.side_effect = [set(), {'5m'}]
+        scanner.symbol_data = {1: data}
+        scanner.kite = None
+        scanner.check_reloads = Mock()
+        scanner.get_required_intervals = Mock(return_value={'5m'})
+        scanner._last_evaluation_at = {1: 100.0}
+        scanner._evaluation_interval = 5.0
+        scanner.bullish_conditions = []
+        scanner.bearish_conditions = []
+        scanner.alert_threshold = 90
+        tick = {'instrument_token': 1, 'timestamp': datetime(2026, 10, 8, 13, 30),
+                'last_price': 100}
+        with patch('scanner.time.monotonic', return_value=101), \
+                patch('scanner.evaluate_side', side_effect=RuntimeError('evaluation reached')) as evaluate:
+            scanner._process_tick_locked(tick)
+            evaluate.assert_not_called()
+            with self.assertRaisesRegex(RuntimeError, 'evaluation reached'):
+                scanner._process_tick_locked(tick)
+        self.assertEqual(data.add_tick.call_count, 2)
+
     def scanner(self, ticker=None):
         scanner = RealtimeScanner.__new__(RealtimeScanner)
         scanner.kws = ticker
         scanner._stop_requested = threading.Event()
         scanner._ticker_closed = threading.Event()
+        scanner._tick_queue = queue.Queue()
+        scanner.connection_status = 'initializing'
+        scanner.connection_error = None
         return scanner
 
     def test_stop_before_initialization_prevents_startup(self):
@@ -32,6 +72,23 @@ class TestScannerStop(unittest.TestCase):
         scanner.resolve_tokens = Mock()
         scanner.run(threaded=True)
         scanner.resolve_tokens.assert_not_called()
+
+    def test_feed_age_is_global_wire_age(self):
+        scanner = self.scanner()
+        scanner._last_tick_received = time.monotonic() - 2
+        self.assertGreaterEqual(scanner.feed_age_seconds(), 2)
+        scanner._last_tick_received = None
+        self.assertIsNone(scanner.feed_age_seconds())
+
+    def test_transport_failure_reconnects_but_auth_failure_is_error(self):
+        scanner = self.scanner()
+        scanner.connection_status = 'connected'
+        scanner.connection_error = None
+        scanner.status_callback = Mock()
+        scanner._set_connection_failure(1006, 'opening handshake timeout')
+        self.assertEqual(scanner.connection_status, 'reconnecting')
+        scanner._set_connection_failure(403, 'Forbidden')
+        self.assertEqual(scanner.connection_status, 'error')
 
     def test_connected_ticker_closes_on_reactor_without_abort(self):
         ticker = Mock()
@@ -61,6 +118,19 @@ class TestScannerStop(unittest.TestCase):
         ticker._close.assert_called_once_with(code=4001, reason='Stale market data')
         ticker.close.assert_not_called()
         self.assertEqual(scanner.connection_status, 'reconnecting')
+
+    def test_stale_exchange_time_does_not_close_new_connection_during_grace(self):
+        ticker = Mock()
+        scanner = self.scanner(ticker)
+        scanner.connection_status = 'connected'
+        scanner.status_callback = Mock()
+        scanner._last_tick_received = time.monotonic()
+        scanner._connected_at = time.monotonic()
+        scanner._last_reconnect_request = 0
+        scanner._latest_wire_exchange_time = datetime(2026, 10, 8, 12, 0)
+        self.assertFalse(scanner.reconnect_if_stale(
+            max_age=60, now=datetime(2026, 10, 8, 12, 16)))
+        ticker._close.assert_not_called()
 
 
 class TestUvicornShutdown(unittest.TestCase):

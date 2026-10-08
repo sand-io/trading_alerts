@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import queue
 import sys
 import threading
 import time
@@ -13,6 +14,7 @@ from kiteconnect import KiteConnect, KiteTicker
 from conditions import load_conditions_from_file
 from notifier import notifier
 from strategy_runtime import evaluate_side, live_event, resolve_direction
+from strategy_runtime import _candle_dict, SUPPORTED_TIMEFRAMES
 
 # pyrefly: ignore [missing-import]
 from dotenv import load_dotenv
@@ -328,6 +330,21 @@ class SymbolData:
             return dt.replace(hour=0, minute=0, second=0, microsecond=0)
         return dt
 
+class EvaluationSnapshot(SymbolData):
+    """Private candle copies with one DataFrame construction per timeframe."""
+    def __init__(self, source):
+        super().__init__(source.instrument_token, source.symbol)
+        with source._lock:
+            self.candles = {iv: [dict(row) for row in rows]
+                            for iv, rows in source.candles.items()}
+        self._frames = {}
+
+    def get_dataframe(self, interval):
+        if interval not in self._frames:
+            self._frames[interval] = super().get_dataframe(interval)
+        return self._frames[interval]
+
+
 class RealtimeScanner:
     def __init__(self, event_callback=None, status_callback=None):
         # Load environment variables
@@ -361,15 +378,39 @@ class RealtimeScanner:
         self.connection_error = None
         self._last_tick_received = None
         self._last_reconnect_request = 0.0
+        self._connected_at = None
+        self._latest_wire_exchange_time = None
+        self._tick_queue = queue.Queue(maxsize=1000)
+        self._tick_worker = None
+        self._last_evaluation_at = {}
+        self._evaluation_interval = 5.0
+        self.processing_error = None
+        self._evaluation_condition = threading.Condition()
+        self._evaluation_lock = threading.RLock()
+        self._pending_evaluations = {}
+        self._evaluation_worker = None
+        self._last_chart_publish = {}
+        self._last_processed_received = None
+        self.latest_market_results = {}
         
         self.load_config()
         self.load_conditions()
 
     def _set_connection_status(self, status, error=None):
+        if status == self.connection_status and (str(error) if error else None) == self.connection_error:
+            return
         self.connection_status = status
         self.connection_error = str(error) if error else None
         if self.status_callback:
             self.status_callback(status, self.connection_error)
+
+    def _set_connection_failure(self, code, reason):
+        """Authentication is fatal; transport failures are automatically retried."""
+        detail = f"{code}: {reason}" if code is not None else str(reason)
+        if "403" in detail:
+            self._set_connection_status("error", reason)
+        else:
+            self._set_connection_status("reconnecting", reason)
 
     def load_config(self):
         if not os.path.exists(CONFIG_FILE):
@@ -497,7 +538,7 @@ class RealtimeScanner:
         with self._process_lock:
             return self._process_tick_locked(tick)
 
-    def _process_tick_locked(self, tick):
+    def _process_tick_locked(self, tick, defer_evaluation=False):
         token = tick.get("instrument_token")
         if token not in self.symbol_data:
             return
@@ -519,7 +560,42 @@ class RealtimeScanner:
         sd.check_and_add_intervals(self.kite, required_intervals)
         
         # Add tick to compile OHLC candles
+        if defer_evaluation and sd.candles.get('5m'):
+            previous = sd.candles['5m'][-1]
+            if sd._get_bucket_time(tick_time, '5m') > previous['time']:
+                self._queue_evaluation(sd, previous['close'],
+                                       sd.get_latest_vwap('5m', previous['close']),
+                                       getattr(sd, '_latest_exchange_time', tick_time))
         rolled_intervals = sd.add_tick(tick)
+        if defer_evaluation:
+            now = time.monotonic()
+            if self.event_callback and (rolled_intervals or
+                    now - self._last_chart_publish.get(token, 0) >= 1):
+                candles = {iv: _candle_dict(rows[-1])
+                           for iv, rows in sd.candles.items()
+                           if iv in SUPPORTED_TIMEFRAMES and rows}
+                market_event = {
+                    'type': 'candle_update', 'symbol': sd.symbol,
+                    'instrument_token': token, 'candles_by_timeframe': candles,
+                    'price': tick['last_price'],
+                    'vwap': sd.get_latest_vwap('5m', tick['last_price']),
+                    'market_time': tick_time.replace(tzinfo=MARKET_TZ).isoformat(),
+                }
+                self.latest_market_results[token] = market_event
+                self.event_callback(market_event)
+                self._last_chart_publish[token] = now
+
+        # All ticks update OHLC/volume, but full indicator calculations need
+        # not repeat for every price packet across hundreds of contracts.
+        # Always evaluate a rollover so closed-candle confirmation is retained.
+        evaluation_times = getattr(self, '_last_evaluation_at', {})
+        evaluation_now = time.monotonic()
+        if (not rolled_intervals and
+                evaluation_now - evaluation_times.get(token, -float('inf')) <
+                getattr(self, '_evaluation_interval', 5.0)):
+            return
+        evaluation_times[token] = evaluation_now
+        self._last_evaluation_at = evaluation_times
 
         ltp = tick.get("last_price")
         if ltp is None:
@@ -527,16 +603,42 @@ class RealtimeScanner:
         # In Kite, average_price is the running daily VWAP
         vwap = sd.get_latest_vwap('5m', ltp)
 
-        bullish = evaluate_side("bullish", self.bullish_conditions, ltp, vwap, sd, self.alert_threshold)
-        bearish = evaluate_side("bearish", self.bearish_conditions, ltp, vwap, sd, self.alert_threshold)
+        if defer_evaluation:
+            self._queue_evaluation(sd, ltp, vwap, tick_time)
+            return
+        return self._evaluate_snapshot(sd, ltp, vwap, tick_time)
+
+    def _queue_evaluation(self, sd, ltp, vwap, tick_time):
+        snapshot = EvaluationSnapshot(sd)
+        candle = snapshot.candles.get('5m', [])
+        if not candle:
+            return
+        key = (sd.instrument_token, candle[-1]['time'])
+        with self._evaluation_condition:
+            # Replace provisional evaluations for the same candle while
+            # retaining the final snapshot of every earlier candle.
+            self._pending_evaluations[key] = (
+                snapshot, ltp, vwap, tick_time,
+                tuple(self.bullish_conditions), tuple(self.bearish_conditions),
+                self.alert_threshold)
+            self._evaluation_condition.notify()
+
+    def _evaluate_snapshot(self, sd, ltp, vwap, tick_time, rules=None):
+        token = sd.instrument_token
+        bull_rules, bear_rules, threshold = rules or (
+            self.bullish_conditions, self.bearish_conditions, self.alert_threshold)
+
+        bullish = evaluate_side("bullish", bull_rules, ltp, vwap, sd, threshold)
+        bearish = evaluate_side("bearish", bear_rules, ltp, vwap, sd, threshold)
         bullish, bearish = resolve_direction(bullish, bearish)
         event = live_event(sd, ltp, vwap, bullish, bearish, market_time=tick_time)
         self.latest_results[token] = event
 
         # Freeze the last live state as the signal for the candle that just closed.
         confirmed_signal = None
-        if "5m" in rolled_intervals and token in self.latest_results:
-            prior = getattr(self, "_prior_results", {}).get(token)
+        prior = getattr(self, '_prior_results', {}).get(token)
+        if (prior and prior.get('candle') and event.get('candle') and
+                prior['candle']['time'] < event['candle']['time']):
             confirmed_signal = self._confirm_once(token, prior)
         event["confirmed_signal"] = confirmed_signal
 
@@ -548,7 +650,8 @@ class RealtimeScanner:
             (bullish, True, "bullish_block"),
             (bearish, False, "bearish_block"),
         ):
-            if result.triggered:
+            if result.triggered and (datetime.now(MARKET_TZ).replace(tzinfo=None) -
+                                     tick_time).total_seconds() <= 10:
                 passed_text = "\n     • ".join(rule.text for rule in result.rules if rule.passed)
                 condition_str = (
                     f"{result.percentage:.1f}% conditions passed "
@@ -561,6 +664,22 @@ class RealtimeScanner:
         if self.event_callback:
             self.event_callback(event)
         return event
+
+    def _process_evaluations(self):
+        while not self._stop_requested.is_set():
+            with self._evaluation_condition:
+                self._evaluation_condition.wait_for(
+                    lambda: self._pending_evaluations or self._stop_requested.is_set(), timeout=0.25)
+                if not self._pending_evaluations:
+                    continue
+                key = next(iter(self._pending_evaluations))
+                sd, ltp, vwap, stamp, bull, bear, threshold = self._pending_evaluations.pop(key)
+            try:
+                with self._evaluation_lock:
+                    self._evaluate_snapshot(sd, ltp, vwap, stamp, (bull, bear, threshold))
+            except Exception as exc:
+                self.processing_error = str(exc)
+                print(f'[EVALUATION ERROR] {exc}')
 
     def _confirm_once(self, token, prior):
         if not prior or not prior.get('candle'):
@@ -580,7 +699,7 @@ class RealtimeScanner:
     def finalize_session(self, now=None):
         """Close the last observed candle at session end even if no new tick arrives."""
         now = market_datetime(now or datetime.now(MARKET_TZ))
-        with self._process_lock:
+        with getattr(self, '_evaluation_lock', self._process_lock):
             for token, prior in getattr(self, '_prior_results', {}).items():
                 if not prior.get('candle'):
                     continue
@@ -602,14 +721,14 @@ class RealtimeScanner:
         ticker = self.kws
         last_tick = self._last_tick_received
         monotonic_now = time.monotonic()
-        exchange_times = [value for value in (
-            getattr(data, '_latest_exchange_time', None)
-            for data in getattr(self, 'symbol_data', {}).values()
-        ) if value is not None]
-        latest_exchange = max(exchange_times) if exchange_times else None
+        latest_exchange = getattr(self, '_latest_wire_exchange_time', None)
         arrivals_stale = last_tick is not None and monotonic_now - last_tick > max_age
+        connected_at = getattr(self, '_connected_at', None)
+        connection_started = connected_at if connected_at is not None else last_tick
+        connection_age = monotonic_now - connection_started if connection_started is not None else 0.0
         exchange_stale = (latest_exchange is not None and
-                          (now - latest_exchange).total_seconds() > max_age)
+                          (now - latest_exchange).total_seconds() > max_age and
+                          connection_age > max_age)
         if (self.connection_status != "connected" or ticker is None or
                 last_tick is None or not (arrivals_stale or exchange_stale) or
                 monotonic_now - self._last_reconnect_request <= max_age):
@@ -630,9 +749,44 @@ class RealtimeScanner:
             recycle_connection()
         return True
 
+    def feed_age_seconds(self):
+        """Age of the last batch received from Kite, independent of one symbol."""
+        last_tick = self._last_tick_received
+        return max(0.0, time.monotonic() - last_tick) if last_tick is not None else None
+
+    def _process_tick_queue(self):
+        """Process ticks away from Twisted so indicator work cannot block pings."""
+        while not self._stop_requested.is_set():
+            try:
+                ticks = self._tick_queue.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            if ticks is None:
+                self._tick_queue.task_done()
+                break
+            try:
+                for tick in ticks:
+                    try:
+                        with self._process_lock:
+                            self._process_tick_locked(tick, defer_evaluation=True)
+                        self._last_processed_received = time.monotonic()
+                    except Exception as exc:
+                        self.processing_error = str(exc)
+                        print(f"[PROCESSING ERROR] {exc}")
+            finally:
+                self._tick_queue.task_done()
+
     def request_stop(self):
         """Prevent reconnects/startup and close Kite on its owning reactor thread."""
         self._stop_requested.set()
+        condition = getattr(self, '_evaluation_condition', None)
+        if condition is not None:
+            with condition:
+                condition.notify_all()
+        try:
+            self._tick_queue.put_nowait(None)
+        except (AttributeError, queue.Full):
+            pass
         ticker = self.kws
         if ticker is None:
             self._ticker_closed.set()
@@ -673,6 +827,12 @@ class RealtimeScanner:
         if self._stop_requested.is_set():
             return
         self._ticker_closed.clear()
+        self._tick_worker = threading.Thread(
+            target=self._process_tick_queue, name="kite-tick-worker", daemon=True)
+        self._tick_worker.start()
+        self._evaluation_worker = threading.Thread(
+            target=self._process_evaluations, name='kite-evaluation-worker', daemon=True)
+        self._evaluation_worker.start()
         self.kws = KiteTicker(api_key, access_token)
         tokens = list(self.token_to_symbol.keys())
         self._set_connection_status("connecting")
@@ -682,8 +842,25 @@ class RealtimeScanner:
                 return
             if ticks:
                 self._last_tick_received = time.monotonic()
-            for tick in ticks:
-                self.process_tick(normalize_kite_tick(tick))
+                # Fresh wire traffic is stronger evidence than a delayed
+                # transport callback left over from a reconnect attempt.
+                if self.connection_status != "connected":
+                    self._set_connection_status("connected")
+            normalized = [normalize_kite_tick(tick) for tick in ticks]
+            exchange_times = [market_datetime(tick.get('exchange_timestamp') or
+                                              tick.get('timestamp'))
+                              for tick in normalized
+                              if tick.get('exchange_timestamp') or tick.get('timestamp')]
+            if exchange_times:
+                newest = max(exchange_times)
+                if (self._latest_wire_exchange_time is None or
+                        newest > self._latest_wire_exchange_time):
+                    self._latest_wire_exchange_time = newest
+            try:
+                self._tick_queue.put_nowait(normalized)
+            except queue.Full:
+                self.processing_error = "Tick processor overloaded: incoming batch could not be retained"
+                print(f"[PROCESSING ERROR] {self.processing_error}")
 
         def on_connect(ws, response):
             self._ticker_closed.clear()
@@ -691,7 +868,7 @@ class RealtimeScanner:
                 ws.close(code=1000, reason="Application shutdown")
                 return
             self._set_connection_status("connected")
-            self._last_tick_received = time.monotonic()
+            self._connected_at = self._last_tick_received = time.monotonic()
             print(f"[WEBSOCKET] Connected! Subscribing to: {list(self.token_to_symbol.values())}")
             ws.subscribe(tokens)
             ws.set_mode(ws.MODE_FULL, tokens)
@@ -700,13 +877,13 @@ class RealtimeScanner:
             self._ticker_closed.set()
             if self._stop_requested.is_set():
                 return
-            self._set_connection_status("disconnected", reason)
+            self._set_connection_failure(code, reason)
             print(f"[WEBSOCKET] Connection closed: Code {code} | Reason: {reason}")
 
         def on_error(ws, code, reason):
             if self._stop_requested.is_set():
                 return
-            self._set_connection_status("error", reason)
+            self._set_connection_failure(code, reason)
             print(f"[WEBSOCKET ERROR] Code {code} | Reason: {reason}")
             if "403" in str(reason):
                 print("[AUTH ERROR] Kite rejected the WebSocket credentials. Run auth.py to refresh KITE_ACCESS_TOKEN.")

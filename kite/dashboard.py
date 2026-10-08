@@ -115,11 +115,13 @@ class LiveBridge:
                 continue
             try:
                 timeframe = subscription["timeframe"]
-                if timeframe not in study_cache:
+                if event.get('type') != 'candle_update' and timeframe not in study_cache:
                     symbol_data = scanner.symbol_data.get(event["instrument_token"])
-                    study_cache[timeframe] = live_study_values(symbol_data, timeframe)
+                    study_cache[timeframe] = await asyncio.to_thread(
+                        live_study_values, symbol_data, timeframe)
                 payload = dict(event)
-                payload["study_values"] = study_cache[timeframe]
+                if timeframe in study_cache:
+                    payload["study_values"] = study_cache[timeframe]
                 await socket.send_json(payload)
             except Exception:
                 dead.append((socket, subscription["symbol"]))
@@ -184,6 +186,10 @@ async def lifespan(app: FastAPI):
         # Both waits are bounded; an upstream outage must not hang ASGI shutdown.
         await asyncio.to_thread(closed.wait, 2)
         await asyncio.to_thread(scanner_thread.join, 2)
+        for worker in (getattr(scanner, '_tick_worker', None),
+                       getattr(scanner, '_evaluation_worker', None)):
+            if isinstance(worker, threading.Thread):
+                await asyncio.to_thread(worker.join, 2)
 
 
 app = FastAPI(title="Kite Strategy Dashboard", version="1.0.0", lifespan=lifespan)
@@ -207,6 +213,10 @@ async def health():
         "error": scanner_state["error"] or scanner.connection_error,
         "symbols": len(scanner.token_to_symbol),
         "threshold": scanner.alert_threshold,
+        "processing_error": getattr(scanner, 'processing_error', None),
+        "pending_tick_batches": scanner._tick_queue.qsize(),
+        "pending_evaluations": len(scanner._pending_evaluations),
+        "feed_age_seconds": scanner.feed_age_seconds(),
     }
 
 
@@ -233,6 +243,7 @@ def snapshot(instrument_token: int, timeframe: str = "5m"):
         "symbol": symbol_data.symbol,
         "instrument_token": instrument_token,
         "strategy": strategy,
+        "market": getattr(scanner, 'latest_market_results', {}).get(instrument_token),
         "signals": scanner.confirmed_signals.get(instrument_token, []),
         "threshold": scanner.alert_threshold,
     })
@@ -255,6 +266,12 @@ async def live_updates(websocket: WebSocket, instrument_token: int):
             # Receive client heartbeats; market events are pushed by the bridge.
             message = await websocket.receive_text()
             if message == "ping":
+                await websocket.send_json({
+                    "type": "feed_heartbeat",
+                    "status": scanner.connection_status,
+                    "error": scanner.connection_error,
+                    "feed_age_seconds": scanner.feed_age_seconds(),
+                })
                 continue
             try:
                 payload = json.loads(message)
