@@ -22,8 +22,10 @@ from conditions import (
 )
 
 
-SUPPORTED_TIMEFRAMES = ("5m", "15m", "1h", "1d")
+SUPPORTED_TIMEFRAMES = ("3m", "5m", "15m", "1h", "1d")
 OVERLAY_SPECS = {
+    "3m": (("ema20", "EMA 20", "#3d9df5", 20, "close", True),
+           ("ema50", "EMA 50", "#f2b84b", 50, "close", True)),
     "5m": (("ema20", "EMA 20", "#3d9df5", 20, "close", True),
            ("ema50", "EMA 50", "#f2b84b", 50, "close", True)),
     "15m": (("haema5", "HA EMA 5", "#3d9df5", 5, "ha_close", True),
@@ -212,7 +214,7 @@ def historical_strategy_states(symbol_data, bullish_conditions, bearish_conditio
     if now.tzinfo is not None:
         now = now.tz_convert('Asia/Kolkata').tz_localize(None)
     frames = {}
-    for interval in SUPPORTED_TIMEFRAMES:
+    for interval in ("5m", "15m", "1h", "1d"):
         frame = symbol_data.get_dataframe(interval).copy()
         if frame.empty:
             return []
@@ -295,7 +297,7 @@ def chart_snapshot(symbol_data, timeframe: str = "5m", limit: int = 300) -> dict
                          "period": period, "source": source,
                          "default_visible": default_visible, "points": points})
 
-    if timeframe == "5m":
+    if timeframe in ("3m", "5m"):
         vwap_points = [
             {"time": _epoch_seconds(row["time"]), "value": float(row["vwap"])}
             for _, row in frame.iterrows()

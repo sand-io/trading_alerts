@@ -461,7 +461,7 @@ class RealtimeScanner:
                 sd.check_and_add_intervals(self.kite, required_intervals)
 
     def get_required_intervals(self):
-        intervals = set()
+        intervals = {'3m'}
         for cond in self.bullish_conditions + self.bearish_conditions:
             intervals.add(cond.interval)
             # If the condition references yesterday or daily closes, we require daily '1d' data

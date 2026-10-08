@@ -44,7 +44,7 @@
   <main class="workspace">
     <section class="chart-panel" id="chartPanel">
       <div class="toolbar">
-        <div class="tf-group" aria-label="Chart timeframe"><button class="tf-btn active" data-timeframe="5m">5m</button><button class="tf-btn" data-timeframe="15m">15m</button><button class="tf-btn" data-timeframe="1h">1h</button><button class="tf-btn" data-timeframe="1d">1D</button></div>
+        <div class="tf-group" aria-label="Chart timeframe"><button class="tf-btn" data-timeframe="3m">3m</button><button class="tf-btn active" data-timeframe="5m">5m</button><button class="tf-btn" data-timeframe="15m">15m</button><button class="tf-btn" data-timeframe="1h">1h</button><button class="tf-btn" data-timeframe="1d">1D</button></div>
         <span class="threshold" title="Configured percentage of rules required to trigger a signal">Signal ≥ <b id="threshold">—</b></span><span class="divider"></span>
         <div id="indicatorChips" style="display:flex;gap:3px"></div>
         <button class="indicator-chip off" id="levelsToggle" title="Show or hide opening-range and previous-day levels"><span class="swatch" style="background:var(--green)"></span>Levels</button>
@@ -78,8 +78,8 @@
         <div class="card-head"><span>Indicator guide</span><span class="score">Chart key</span></div>
         <div class="guide">
           <div class="guide-section">VISIBLE CHART OVERLAYS</div>
-          <div class="guide-row"><div class="guide-name"><span class="swatch" style="background:var(--blue)"></span>Fast EMA</div><p>EMA 20 on 5m, Heikin-Ashi EMA 5 on 15m, and EMA 9 on 1h/1D.</p></div>
-          <div class="guide-row"><div class="guide-name"><span class="swatch" style="background:var(--amber)"></span>Slow EMA</div><p>EMA 50 on 5m/1h/1D and Heikin-Ashi EMA 9 on 15m.</p></div>
+          <div class="guide-row"><div class="guide-name"><span class="swatch" style="background:var(--blue)"></span>Fast EMA</div><p>EMA 20 on 3m/5m, Heikin-Ashi EMA 5 on 15m, and EMA 9 on 1h/1D.</p></div>
+          <div class="guide-row"><div class="guide-name"><span class="swatch" style="background:var(--amber)"></span>Slow EMA</div><p>EMA 50 on 3m/5m/1h/1D and Heikin-Ashi EMA 9 on 15m.</p></div>
           <div class="guide-row"><div class="guide-name"><span class="swatch" style="background:var(--violet)"></span>VWAP</div><p>Session volume-weighted average price. Exact Kite average price is used live; history is reconstructed from candle price and volume.</p></div>
           <div class="guide-row"><div class="guide-name"><span class="swatch" style="background:var(--green)"></span>Opening 15m H/L</div><p>High and low of the first three 5-minute candles. These levels become final after 09:30 IST.</p></div>
           <div class="guide-row"><div class="guide-name"><span class="swatch" style="background:#7c8da3"></span>Previous H/L</div><p>Previous completed trading day's high and low.</p></div>
@@ -94,7 +94,7 @@
           <div class="guide-row"><div class="guide-name"><span class="calc-tag">BODY</span>Candle body strength</div><p>Absolute body divided by full high-low range: above 60% bullish or 55% bearish.</p></div>
           <div class="guide-row"><div class="guide-name"><span class="calc-tag">1D</span>Daily trend filters</div><p>Current daily close versus EMA(9), EMA(50), plus daily RSI(14).</p></div>
         </div>
-        <div class="note">The chart opens in a clean 65-candle view. Select 5m, 15m, 1h or 1D above. Click any indicator—or Levels—to show or hide it. Hover over candles for exact values. All times are IST and label candle starts, not closes. Daily labels identify the trading date. The regular NSE session is 09:15–15:30; its final hourly candle starts at 15:15 and ends at 15:30.</div>
+        <div class="note">The chart opens in a clean 65-candle view. Select 3m, 5m, 15m, 1h or 1D above. Click any indicator—or Levels—to show or hide it. Hover over candles for exact values. All times are IST and label candle starts, not closes. Daily labels identify the trading date. The regular NSE session is 09:15–15:30; its final hourly candle starts at 15:15 and ends at 15:30.</div>
       </section>
     </aside>
   </main>

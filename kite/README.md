@@ -218,3 +218,5 @@ observed candle at session close without constructing a synthetic candle; signal
 are stored once per candle. Restart after upgrading to clear old in-memory
 post-close candles and signals. Special trading sessions require an explicit
 exchange calendar before use; feed connectivity alone does not mean market open.
+
+The dashboard also supports a 3-minute chart with EMA 20/50 and optional VWAP, using historical 3-minute candles and live tick updates. Combined strategy signals continue to use the configured strategy timeframes.

@@ -1,7 +1,7 @@
 import unittest
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -11,6 +11,38 @@ from strategy_runtime import chart_snapshot, evaluate_side, live_event, resolve_
 
 
 class TestLiveDashboard(unittest.TestCase):
+    def test_three_minute_chart_history_overlays_and_live_rollover(self):
+        from scanner import RealtimeScanner
+        from unittest.mock import Mock
+        scanner = RealtimeScanner.__new__(RealtimeScanner)
+        scanner.bullish_conditions = []
+        scanner.bearish_conditions = []
+        self.assertIn('3m', scanner.get_required_intervals())
+        data = SymbolData(1, 'NSE:TEST')
+        broker = Mock()
+        broker.historical_data.return_value = [
+            {'date': datetime(2026, 10, 7, 9, 15) + timedelta(minutes=3*i),
+             'open': 100+i, 'high': 102+i, 'low': 99+i, 'close': 101+i, 'volume': 10}
+            for i in range(55)]
+        data.check_and_add_intervals(broker, {'3m'})
+        self.assertEqual(broker.historical_data.call_args.args[-1], '3minute')
+        snapshot = chart_snapshot(data, '3m')
+        overlays = {item['id']: item for item in snapshot['overlays']}
+        self.assertEqual(set(overlays), {'ema20', 'ema50', 'vwap'})
+        self.assertTrue(overlays['ema20']['points'])
+        self.assertTrue(overlays['ema50']['points'])
+        self.assertEqual(snapshot['studies'], [])
+        for minute, price, volume in ((15, 100, 100), (17, 102, 120), (18, 101, 140)):
+            data.add_tick({'timestamp': datetime(2026, 10, 8, 9, minute),
+                           'last_price': price, 'volume': volume, 'average_price': 101})
+        snapshot = chart_snapshot(data, '3m')
+        self.assertEqual(snapshot['candles'][-2]['open'], 100)
+        self.assertEqual(snapshot['candles'][-2]['close'], 102)
+        self.assertEqual(data.candles['3m'][-1]['time'], datetime(2026, 10, 8, 9, 18))
+        side = evaluate_side('bullish', [], 101, 101, data, 100)
+        event = live_event(data, 101, 101, side, side)
+        self.assertEqual(event['candles_by_timeframe']['3m'], snapshot['candles'][-1])
+
     def test_conflicting_direction_uses_stronger_score_and_tie_is_neutral(self):
         from strategy_runtime import RuleResult, SideResult
         rules = (RuleResult('test', True),)
