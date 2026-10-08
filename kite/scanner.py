@@ -12,7 +12,7 @@ from kiteconnect import KiteConnect, KiteTicker
 
 from conditions import load_conditions_from_file
 from notifier import notifier
-from strategy_runtime import evaluate_side, live_event
+from strategy_runtime import evaluate_side, live_event, resolve_direction
 
 # pyrefly: ignore [missing-import]
 from dotenv import load_dotenv
@@ -359,6 +359,8 @@ class RealtimeScanner:
         self._finalized_candles = {}
         self.connection_status = "initializing"
         self.connection_error = None
+        self._last_tick_received = None
+        self._last_reconnect_request = 0.0
         
         self.load_config()
         self.load_conditions()
@@ -527,7 +529,8 @@ class RealtimeScanner:
 
         bullish = evaluate_side("bullish", self.bullish_conditions, ltp, vwap, sd, self.alert_threshold)
         bearish = evaluate_side("bearish", self.bearish_conditions, ltp, vwap, sd, self.alert_threshold)
-        event = live_event(sd, ltp, vwap, bullish, bearish)
+        bullish, bearish = resolve_direction(bullish, bearish)
+        event = live_event(sd, ltp, vwap, bullish, bearish, market_time=tick_time)
         self.latest_results[token] = event
 
         # Freeze the last live state as the signal for the candle that just closed.
@@ -589,6 +592,44 @@ class RealtimeScanner:
                 if signal and self.event_callback:
                     self.event_callback({**prior, 'confirmed_signal': signal})
 
+    def reconnect_if_stale(self, max_age=60.0, now=None):
+        """Recycle a connected Kite socket when the whole live feed goes quiet."""
+        now = market_datetime(now or datetime.now(MARKET_TZ))
+        session_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        session_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+        if now.weekday() >= 5 or not session_open <= now < session_close:
+            return False
+        ticker = self.kws
+        last_tick = self._last_tick_received
+        monotonic_now = time.monotonic()
+        exchange_times = [value for value in (
+            getattr(data, '_latest_exchange_time', None)
+            for data in getattr(self, 'symbol_data', {}).values()
+        ) if value is not None]
+        latest_exchange = max(exchange_times) if exchange_times else None
+        arrivals_stale = last_tick is not None and monotonic_now - last_tick > max_age
+        exchange_stale = (latest_exchange is not None and
+                          (now - latest_exchange).total_seconds() > max_age)
+        if (self.connection_status != "connected" or ticker is None or
+                last_tick is None or not (arrivals_stale or exchange_stale) or
+                monotonic_now - self._last_reconnect_request <= max_age):
+            return False
+        self._last_reconnect_request = monotonic_now
+        self._set_connection_status("reconnecting", "Kite feed stale; reconnecting")
+        from twisted.internet import reactor
+        def recycle_connection():
+            # Do not call KiteTicker.close(): it disables the SDK retry loop.
+            if ticker.is_connected():
+                # Autobahn accepts normal closure (1000) or application-defined
+                # codes in 3000-4999. Keep this non-normal so Kite's retry
+                # factory treats the stale socket as a lost connection.
+                ticker._close(code=4001, reason="Stale market data")
+        if reactor.running:
+            reactor.callFromThread(recycle_connection)
+        else:
+            recycle_connection()
+        return True
+
     def request_stop(self):
         """Prevent reconnects/startup and close Kite on its owning reactor thread."""
         self._stop_requested.set()
@@ -639,6 +680,8 @@ class RealtimeScanner:
         def on_ticks(ws, ticks):
             if self._stop_requested.is_set():
                 return
+            if ticks:
+                self._last_tick_received = time.monotonic()
             for tick in ticks:
                 self.process_tick(normalize_kite_tick(tick))
 
@@ -648,6 +691,7 @@ class RealtimeScanner:
                 ws.close(code=1000, reason="Application shutdown")
                 return
             self._set_connection_status("connected")
+            self._last_tick_received = time.monotonic()
             print(f"[WEBSOCKET] Connected! Subscribing to: {list(self.token_to_symbol.values())}")
             ws.subscribe(tokens)
             ws.set_mode(ws.MODE_FULL, tokens)

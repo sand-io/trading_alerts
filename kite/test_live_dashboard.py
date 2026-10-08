@@ -7,10 +7,33 @@ import pandas as pd
 
 from conditions import Condition
 from scanner import SymbolData, market_datetime, normalize_kite_tick
-from strategy_runtime import chart_snapshot, evaluate_side
+from strategy_runtime import chart_snapshot, evaluate_side, live_event, resolve_direction
 
 
 class TestLiveDashboard(unittest.TestCase):
+    def test_conflicting_direction_uses_stronger_score_and_tie_is_neutral(self):
+        from strategy_runtime import RuleResult, SideResult
+        rules = (RuleResult('test', True),)
+        bull = SideResult('bullish', 8, 14, 57.1, True, rules)
+        bear = SideResult('bearish', 5, 14, 35.7, True, rules)
+        resolved_bull, resolved_bear = resolve_direction(bull, bear)
+        self.assertTrue(resolved_bull.triggered)
+        self.assertFalse(resolved_bear.triggered)
+        self.assertEqual(resolved_bear.percentage, 35.7)
+
+        tied_bull, tied_bear = resolve_direction(
+            bull, SideResult('bearish', 8, 14, 57.1, True, rules))
+        self.assertFalse(tied_bull.triggered)
+        self.assertFalse(tied_bear.triggered)
+
+    def test_live_event_reports_exchange_time_separately_from_server_time(self):
+        data = SymbolData(1, 'NSE:TEST')
+        market_time = datetime(2026, 10, 8, 11, 18, 7)
+        side = evaluate_side('bullish', [], 100, 100, data, 100)
+        event = live_event(data, 100, 100, side, side, market_time=market_time)
+        self.assertEqual(event['market_time'], '2026-10-08T11:18:07+05:30')
+        self.assertIn('server_time', event)
+
     def test_ribbon_replay_excludes_future_higher_timeframe_ohlc(self):
         from strategy_runtime import historical_strategy_states
         rows = [{'time': datetime(2026, 10, 7, 9, minute), 'open': 100,

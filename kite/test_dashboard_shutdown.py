@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 import unittest
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -44,6 +45,22 @@ class TestScannerStop(unittest.TestCase):
         ticker.close.assert_called_once_with(code=1000, reason='Application shutdown')
         ticker.factory.connector.disconnect.assert_not_called()
         self.assertFalse(closed.is_set())  # wait for the close callback, not just sendClose
+
+    def test_stale_connected_feed_requests_retry_without_disabling_it(self):
+        ticker = Mock()
+        ticker.is_connected.return_value = True
+        scanner = self.scanner(ticker)
+        scanner.connection_status = 'connected'
+        scanner.status_callback = Mock()
+        scanner._last_tick_received = time.monotonic() - 120
+        scanner._last_reconnect_request = 0
+        reactor = Mock(running=True)
+        with patch('twisted.internet.reactor', reactor):
+            self.assertTrue(scanner.reconnect_if_stale(now=datetime(2026, 10, 8, 11, 34)))
+            reactor.callFromThread.call_args.args[0]()
+        ticker._close.assert_called_once_with(code=4001, reason='Stale market data')
+        ticker.close.assert_not_called()
+        self.assertEqual(scanner.connection_status, 'reconnecting')
 
 
 class TestUvicornShutdown(unittest.TestCase):

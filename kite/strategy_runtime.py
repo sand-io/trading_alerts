@@ -4,7 +4,7 @@ This module is deliberately independent of FastAPI.  The scanner, notifier and
 dashboard all consume the same evaluation result, preventing rule drift.
 """
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
@@ -83,6 +83,17 @@ def evaluate_side(side: str, conditions: Iterable, ltp: float, vwap: float,
         triggered=bool(total and percentage >= threshold),
         rules=tuple(results),
     )
+
+
+def resolve_direction(bullish: SideResult, bearish: SideResult) -> tuple[SideResult, SideResult]:
+    """Resolve two qualifying scores into at most one directional signal."""
+    if not (bullish.triggered and bearish.triggered):
+        return bullish, bearish
+    if bullish.percentage > bearish.percentage:
+        return bullish, replace(bearish, triggered=False)
+    if bearish.percentage > bullish.percentage:
+        return replace(bullish, triggered=False), bearish
+    return replace(bullish, triggered=False), replace(bearish, triggered=False)
 
 
 def _epoch_seconds(value) -> int:
@@ -182,6 +193,7 @@ def historical_evaluation(symbol_data, bullish_conditions, bearish_conditions,
                             symbol_data, threshold)
     bearish = evaluate_side('bearish', bearish_conditions, price, vwap,
                             symbol_data, threshold)
+    bullish, bearish = resolve_direction(bullish, bearish)
     event = live_event(symbol_data, price, vwap, bullish, bearish)
     event['evaluation_source'] = 'historical'
     event['as_of'] = _epoch_seconds(row['time'])
@@ -253,6 +265,7 @@ def historical_strategy_states(symbol_data, bullish_conditions, bearish_conditio
         price, vwap = float(row['close']), row.get('vwap')
         bull = evaluate_side('bullish', bullish_conditions, price, vwap, view, threshold)
         bear = evaluate_side('bearish', bearish_conditions, price, vwap, view, threshold)
+        bull, bear = resolve_direction(bull, bear)
         summary = lambda result: {key: value for key, value in result.to_dict().items() if key != 'rules'}
         output.append({'candle': _candle_dict(row), 'bullish': summary(bull),
                        'bearish': summary(bear), 'evaluation_source': 'reconstructed'})
@@ -320,7 +333,9 @@ def chart_snapshot(symbol_data, timeframe: str = "5m", limit: int = 300) -> dict
 
 
 def live_event(symbol_data, ltp: float, vwap: float, bullish: SideResult,
-               bearish: SideResult) -> dict[str, Any]:
+               bearish: SideResult, market_time: datetime | None = None) -> dict[str, Any]:
+    if market_time is not None and market_time.tzinfo is None:
+        market_time = market_time.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
     candles_by_timeframe = {}
     for timeframe in SUPPORTED_TIMEFRAMES:
         frame = symbol_data.get_dataframe(timeframe)
@@ -332,6 +347,9 @@ def live_event(symbol_data, ltp: float, vwap: float, bullish: SideResult,
         "symbol": symbol_data.symbol,
         "instrument_token": symbol_data.instrument_token,
         "server_time": datetime.now(ZoneInfo("Asia/Kolkata")).isoformat(),
+        # Keep the exchange timestamp separate from server processing time.  A
+        # delayed Kite tick must not make stale candles appear freshly updated.
+        "market_time": market_time.isoformat() if market_time is not None else None,
         "price": float(ltp),
         "vwap": float(vwap) if vwap is not None else None,
         "candle": candle,

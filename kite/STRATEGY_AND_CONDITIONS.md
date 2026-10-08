@@ -40,7 +40,7 @@ Used by the Kite scanner and dashboard.
 
 ### Combined alert condition
 
-Each side is evaluated independently:
+Each side is scored independently:
 
 ```text
 Passing percentage = passed conditions / 14 × 100
@@ -48,7 +48,10 @@ Alert when passing percentage >= 30%
 ```
 
 The current threshold requires at least 5 of 14 conditions, not all 14.
-Both sides can qualify simultaneously.
+If both sides reach the threshold on the same evaluation, only the side with
+the higher passing percentage becomes the directional signal. An exact tie is
+treated as ambiguous and produces no directional signal. Both raw scores remain
+visible on the dashboard.
 
 ### Condition meanings
 

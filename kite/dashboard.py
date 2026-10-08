@@ -168,6 +168,7 @@ async def lifespan(app: FastAPI):
     async def close_session_candles():
         while True:
             await asyncio.to_thread(scanner.finalize_session)
+            await asyncio.to_thread(scanner.reconnect_if_stale)
             await asyncio.sleep(1)
     finalizer = asyncio.create_task(close_session_candles())
     try:
