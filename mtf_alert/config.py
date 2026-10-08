@@ -36,7 +36,7 @@ class Settings:
 
     @classmethod
     def load(cls, base_dir: Path) -> "Settings":
-        # The shared token is refreshed by mtf_alert.auth and must win over a
+        # The shared token is refreshed by kite_runtime.auth and must win over a
         # stale value inherited from the parent shell or another application.
         load_dotenv(base_dir.parent / ".env", override=True)
         config_path = base_dir / "config.json"

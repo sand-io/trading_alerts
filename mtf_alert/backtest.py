@@ -423,7 +423,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         write_csv(results, args.output)
     except KiteException as exc:
-        raise SystemExit(f"Kite request failed: {exc}. Run `python -m mtf_alert.auth`.") from exc
+        raise SystemExit(f"Kite request failed: {exc}. Run `.venv/bin/python -m kite_runtime mtf --login`.") from exc
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 

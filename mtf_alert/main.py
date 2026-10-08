@@ -44,7 +44,7 @@ def main() -> None:
         tokens = data.resolve(settings.symbols)
     except KiteException as exc:
         raise SystemExit(
-            f"Kite authentication failed: {exc}. Run `python -m mtf_alert.auth`."
+            f"Kite authentication failed: {exc}. Run `.venv/bin/python -m kite_runtime mtf --login`."
         ) from exc
     except (FileNotFoundError, ValueError) as exc:
         raise SystemExit(f"Startup failed: {exc}") from exc

@@ -1,6 +1,6 @@
 import unittest
 
-from mtf_alert.auth import parse_request_token
+from kite_runtime.auth import parse_request_token
 
 
 class AuthenticationTests(unittest.TestCase):

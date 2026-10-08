@@ -25,7 +25,7 @@ def run_pattern_scanner():
     access_token = os.getenv("KITE_ACCESS_TOKEN")
     
     if not api_key or not access_token:
-        print("[ERROR] Credentials missing in .env file. Please run auth.py first.")
+        print("[ERROR] Credentials missing in .env file. From trading_alerts, run .venv/bin/python -m kite_runtime kite --login first.")
         sys.exit(1)
         
     # Read config.json for symbols

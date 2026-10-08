@@ -55,7 +55,7 @@ graph TD
 * **`scanner.py`**: The central daemon process that connects to the WebSocket feed, manages historical data, aggregates candles, and runs the evaluation loop.
 * **`conditions.py`**: Contains indicators utilizing `ta-lib` (e.g., MACD, RSI, ADX, Heikin-Ashi) and contains the natural-language condition parsers.
 * **`notifier.py`**: Handles alert throttling (cooldowns) and triggers terminal printouts and macOS desktop notifications.
-* **`auth.py`**: Interactive script to authenticate with Kite Connect and retrieve the access token.
+* **`../kite_runtime/auth.py`**: Shared Kite Connect authentication used by both Kite applications.
 * **`test_parser.py`**: Unit tests verifying rule parsing and logic evaluation.
 * **`config.json`**: List of symbols to track.
 * **`nifty200_futures_underlyings.json`**: The 200 PDF reference underlyings.
@@ -115,6 +115,35 @@ Define the list of symbols you wish to scan:
 
 ## Usage
 
+### One-command startup (recommended)
+
+From `trading_alerts`, run:
+
+```bash
+.venv/bin/python -m kite_runtime kite
+```
+
+One-time setup: in your Kite developer app, set **Redirect URL** to
+`http://127.0.0.1:8765/callback`. Run the command on the same computer as your
+browser. Keep `KITE_API_KEY` and `KITE_API_SECRET` in the shared root `.env`.
+The launcher checks the saved access token; if it has expired, it opens Zerodha
+login and waits up to five minutes for the local callback. Complete the browser
+login and app-code step yourself. The request token is captured automatically,
+exchanged, and the access token saved to `.env` without displaying it.
+
+The command starts only the Kite dashboard and its alert scanner. Open
+`http://127.0.0.1:8000` for the dashboard. Do not also start `scanner.py`.
+Ctrl+C stops Kite. A valid token is reused on subsequent starts. If a token
+expires while running, stop and rerun the command.
+
+To start MTF alerts separately, use `.venv/bin/python -m kite_runtime mtf`.
+Both applications share authentication through the `kite_runtime/` package.
+Options: `--login` to force login and `--port 8001` to change the dashboard port.
+The callback remains on port 8765.
+If you keep a different developer-app redirect URL, use `--manual-auth` to paste
+the redirect URL; saving the access token and starting services are still automatic.
+
+
 ### Live candlestick strategy dashboard
 
 The dashboard and alert scanner share the same KiteTicker connection, candle
@@ -143,11 +172,13 @@ does not include VWAP, so pre-connection chart history uses a conventional
 OHLC-volume reconstruction and switches to Kite's exact value on live ticks.
 
 ### 1. Authentication
-To get a fresh access token (required daily by Zerodha), run the authentication script:
+To force a fresh login and start Kite, run from `trading_alerts`:
 ```bash
-python auth.py
+.venv/bin/python -m kite_runtime kite --login
 ```
-Copy and paste the redirect URL or `request_token` when prompted. Manually update your `KITE_ACCESS_TOKEN` in the `.env` file.
+Login captures the callback and saves `KITE_ACCESS_TOKEN` to the root `.env`
+automatically. Add `--manual-auth` to paste a redirect URL or request token
+if your developer app uses a different redirect URL.
 
 ### 2. Running the Scanner
 To start the real-time scanning daemon:

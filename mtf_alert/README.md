@@ -2,6 +2,7 @@
 
 Standalone, alert-only implementation of the supplied Gold/Crude multi-timeframe strategy. It does
 not import from, modify, or place orders through the existing `kite/` application.
+Both applications use the shared root authentication helper and `.env`.
 
 ## Strategy
 
@@ -77,16 +78,31 @@ KITE_API_SECRET=your_api_secret
 KITE_ACCESS_TOKEN=
 ```
 
-Then generate the daily access token:
+For automatic login and MTF startup, set your Kite developer app's
+Redirect URL once to `http://127.0.0.1:8765/callback`, then run from `trading_alerts`:
 
 ```bash
-python -m mtf_alert.auth
+.venv/bin/python -m kite_runtime mtf
 ```
 
-Open the displayed Zerodha URL, complete login, and paste the redirect URL back into the terminal.
-The helper exchanges its one-time request token and writes `KITE_ACCESS_TOKEN` to the shared `.env` without
-printing it. The redirect URL configured in your Kite developer application must be reachable and
-must match the login flow. Run authentication again whenever the access token expires.
+Complete browser login and the app-code step when prompted. The command captures
+the request token, saves the shared access token, and starts only MTF alerts.
+A valid saved token skips login. Ctrl+C stops MTF. Use `--login` for a fresh
+login, or `--manual-auth` if you keep a different developer-app redirect URL.
+Stop any existing MTF monitor before starting the launcher.
+To run Kite separately, use `.venv/bin/python -m kite_runtime kite` and open
+`http://127.0.0.1:8000`. Both apps share the `kite_runtime/` authentication helper.
+
+To force a fresh login and start MTF alerts:
+
+```bash
+.venv/bin/python -m kite_runtime mtf --login
+```
+
+Login captures the callback and saves `KITE_ACCESS_TOKEN` to the shared `.env`
+without displaying it. Add `--manual-auth` to paste the redirect URL when using
+a different developer-app redirect URL. Restart through the launcher whenever
+the access token expires.
 
 Keep the contracts in `config.json` updated with currently tradable exact Kite instruments;
 commodity futures expire and cannot be hard-coded permanently. The example session is MCX
