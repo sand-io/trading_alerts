@@ -11,10 +11,23 @@ from .auth import ensure_session
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def service_process_options():
+    if sys.platform == 'win32':
+        return {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {'start_new_session': True}
+
+
 def stop_services(processes):
     for process in processes:
         if process.poll() is None:
-            process.send_signal(signal.SIGINT)
+            stop_signal = (signal.CTRL_BREAK_EVENT if sys.platform == 'win32'
+                           else signal.SIGINT)
+            try:
+                process.send_signal(stop_signal)
+            except OSError:
+                # The child may have exited, or lost its Windows console.
+                if process.poll() is None:
+                    process.terminate()
     deadline = time.monotonic() + 10
     for process in processes:
         try:
@@ -44,11 +57,11 @@ def main():
         if args.application == 'kite':
             processes.append(subprocess.Popen(
                 [sys.executable, '-m', 'uvicorn', 'dashboard:app', '--host', '127.0.0.1', '--port', str(args.port)],
-                cwd=ROOT / 'kite', start_new_session=True))
+                cwd=ROOT / 'kite', **service_process_options()))
             print(f'Kite dashboard starting at http://127.0.0.1:{args.port} (includes Kite alerts).', flush=True)
         if args.application == 'mtf':
             processes.append(subprocess.Popen(
-                [sys.executable, '-m', 'mtf_alert'], cwd=ROOT, start_new_session=True))
+                [sys.executable, '-m', 'mtf_alert'], cwd=ROOT, **service_process_options()))
             print('MTF alerts starting. Press Ctrl+C to stop.', flush=True)
         while True:
             for process in processes:

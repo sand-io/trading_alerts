@@ -81,6 +81,28 @@ class SessionTests(unittest.TestCase):
 
 
 class LauncherTests(unittest.TestCase):
+    def test_windows_children_use_process_groups_and_supported_stop_signal(self):
+        child = MagicMock()
+        child.poll.return_value = None
+        with patch.object(start.sys, 'platform', 'win32'), \
+                patch.object(start.subprocess, 'CREATE_NEW_PROCESS_GROUP', 512, create=True), \
+                patch.object(start.signal, 'CTRL_BREAK_EVENT', 1, create=True):
+            self.assertEqual(start.service_process_options(), {'creationflags': 512})
+            start.stop_services([child])
+        child.send_signal.assert_called_once_with(1)
+        child.terminate.assert_not_called()
+        child.kill.assert_not_called()
+
+    def test_failed_signal_falls_back_and_still_stops_remaining_children(self):
+        first, second = MagicMock(), MagicMock()
+        first.poll.return_value = second.poll.return_value = None
+        first.send_signal.side_effect = OSError('console unavailable')
+        start.stop_services([first, second])
+        first.terminate.assert_called_once()
+        second.send_signal.assert_called_once()
+        first.wait.assert_called_once()
+        second.wait.assert_called_once()
+
     @patch('kite_runtime.launcher.signal.signal')
     @patch('kite_runtime.launcher.stop_services')
     @patch('kite_runtime.launcher.subprocess.Popen')
