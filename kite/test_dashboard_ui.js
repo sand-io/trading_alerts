@@ -53,7 +53,7 @@ assert.equal(series[0].points[0].value,undefined);
 assert.ok(indicator.readout().includes('No strategy evaluation'));
 let chartCount=0;
 const chartMocks=[];
-const nodes=new Map(),node=()=>({style:{},classList:{toggle(){}},append(){},replaceChildren(){},setAttribute(){}});
+const nodes=new Map(),node=()=>({style:{},classList:{toggle(){}},children:[],value:'',append(){},replaceChildren(...children){this.children=children;this.value=children[0]?.value??''},setAttribute(){}});
 const document={getElementById(id){if(!nodes.has(id))nodes.set(id,node());return nodes.get(id)},createElement:node,querySelectorAll(){return []}};
 const context=vm.createContext({document,KiteStrategyIndicator:{createStrategyIndicator},
  LightweightCharts:{CrosshairMode:{Normal:0},createChart(){chartCount++;const mock={...chart,range:null,removeSeries(){},timeScale(){return {subscribeVisibleLogicalRangeChange(callback){mock.rangeCallback=callback},getVisibleLogicalRange(){return mock.range},setVisibleLogicalRange(range){mock.range=range;mock.rangeCallback?.(range)}}},addCandlestickSeries(){return {setData(){},setMarkers(){},update(){}}},subscribeCrosshairMove(){},applyOptions(){}};chartMocks.push(mock);return mock}},
@@ -79,4 +79,36 @@ assert.ok(html.includes('renderOhlc(candle);refreshMarkers()'));
 vm.runInContext("renderMarket({instrument_token:1,market_time:'2026-10-08T13:43:00+05:30',price:100,vwap:99});renderLive({type:'candle_update',instrument_token:1,market_time:'2026-10-08T13:39:00+05:30',price:90,vwap:89})",context);
 assert.equal(nodes.get('price').textContent,'100.00');
 assert.equal(vm.runInContext("marketIsCurrent({instrument_token:1,market_time:'2026-10-08T13:39:00+05:30'})",context),false);
-console.log('Dashboard layout, symbol search, studies, and legacy score fidelity tests passed');
+async function testSearchSelection(){
+ vm.runInContext("allSymbols=[{token:1,symbol:'NFO:RELIANCE26OCTFUT'},{token:2,symbol:'NFO:TCS26OCTFUT'}];currentToken=null;renderSymbolOptions()",context);
+ const select=nodes.get('symbol');
+ assert.equal(select.value,'1'); // startup still selects the first configured symbol
+ vm.runInContext("currentToken=1;renderSymbolOptions('tcs')",context);
+ assert.equal(select.value,''); // filtering must not silently select an unloaded chart
+ assert.equal(select.children[0].disabled,true);
+ assert.equal(select.children[1].value,'2');
+ assert.equal(vm.runInContext('currentToken',context),1);
+ vm.runInContext("globalThis.loadedTokens=[];globalThis.connectedTokens=[];loadSnapshot=async token=>loadedTokens.push(token);connect=token=>connectedTokens.push(token)",context);
+ select.value='2';
+ await vm.runInContext('chooseSymbol()',context);
+ assert.equal(vm.runInContext('currentToken',context),2);
+ assert.equal(vm.runInContext('loadedTokens.join()',context),'2');
+ assert.equal(vm.runInContext('connectedTokens.join()',context),'2');
+ vm.runInContext("renderSymbolOptions('')",context);
+ assert.equal(select.value,'2'); // clearing the search preserves the newly loaded chart
+ vm.runInContext("renderSymbolOptions('missing')",context);
+ assert.equal(select.disabled,true);
+ assert.equal(select.value,'');
+ await vm.runInContext('chooseSymbol()',context);
+ assert.equal(vm.runInContext('loadedTokens.length',context),1);
+ assert.equal(vm.runInContext('currentToken',context),2);
+ vm.runInContext("symbolSearch.value='rel'",context);
+ await vm.runInContext('selectFirstSearchResult()',context);
+ assert.equal(select.disabled,false);
+ assert.equal(vm.runInContext('currentToken',context),1);
+ assert.equal(vm.runInContext('loadedTokens.join()',context),'2,1');
+ vm.runInContext("renderSymbolOptions('')",context);
+ assert.equal(select.value,'1');
+ console.log('Dashboard layout, symbol selection and search clearing, studies, and legacy score fidelity tests passed');
+}
+testSearchSelection().catch(error=>{console.error(error);process.exitCode=1});
