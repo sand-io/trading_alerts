@@ -220,3 +220,34 @@ post-close candles and signals. Special trading sessions require an explicit
 exchange calendar before use; feed connectivity alone does not mean market open.
 
 The dashboard also supports a 3-minute chart with EMA 20/50 and optional VWAP, using historical 3-minute candles and live tick updates. Combined strategy signals continue to use the configured strategy timeframes.
+
+### Saved session review (SQLite)
+
+The scanner now records live rule evaluations (normally every five seconds per
+symbol), alerts accepted by the notifier after cooldown, and confirmed 5-minute
+candle states in `kite/data/history.sqlite3`. Each evaluation saves its rule texts,
+pass/fail results, price, live VWAP, exchange timestamp, candle, and configured
+threshold. Alerts and confirmed candle marks are separate: an intrabar alert can
+fire without a directional signal at candle close. Desktop delivery can still fail
+while a notifier alert is recorded.
+
+Restart the application to enable recording. Select a symbol, choose **Review
+date**, and click **Review saved day**. The chart loads saved candles and indicator
+series; the session list contains evaluations and alerts. Select an entry to see
+its saved rule results, or click a 5m candle for its last saved evaluation. BULL/BEAR
+marks remain on the 5m chart. **Return to live** resumes live display. Recording
+continues for all configured symbols while reviewing a date.
+
+History survives application restarts. Chart series are checkpointed once per
+5m candle and again at session close, with up to 300 candles per timeframe for
+indicator context. An abrupt stop may leave the last chart checkpoint incomplete;
+individual committed evaluations remain available. The archive is local and is
+not automatically deleted; monitor disk use, especially with many symbols.
+Set `KITE_HISTORY_DB` to override the database path. Back up the database with
+SQLite's backup API, or stop the application before copying it.
+
+Only observations recorded after this upgrade are available. Missing sessions or
+time while the scanner was stopped are not fabricated. Historical rule snapshots
+are not rewritten when rule files change. Review is a record of live behavior,
+not a historical backtest, trade execution log, or P&L calculation. Normal startup
+still uses Kite authentication and symbol resolution.

@@ -13,8 +13,9 @@ from kiteconnect import KiteConnect, KiteTicker
 
 from conditions import load_conditions_from_file
 from notifier import notifier
+from history import HistoryStore
 from strategy_runtime import evaluate_side, live_event, resolve_direction
-from strategy_runtime import _candle_dict, SUPPORTED_TIMEFRAMES
+from strategy_runtime import _candle_dict, SUPPORTED_TIMEFRAMES, chart_snapshot
 
 # pyrefly: ignore [missing-import]
 from dotenv import load_dotenv
@@ -370,6 +371,9 @@ class RealtimeScanner:
         self.symbol_data = {}  # token -> SymbolData
         self.event_callback = event_callback
         self.status_callback = status_callback
+        self.history = HistoryStore(os.getenv("KITE_HISTORY_DB", str(KITE_DIR / "data" / "history.sqlite3")))
+        self._archived_chart_candles = {}
+        self.history_error = None
         self.latest_results = {}
         self.confirmed_signals = {}
         self._process_lock = threading.RLock()
@@ -632,7 +636,16 @@ class RealtimeScanner:
         bearish = evaluate_side("bearish", bear_rules, ltp, vwap, sd, threshold)
         bullish, bearish = resolve_direction(bullish, bearish)
         event = live_event(sd, ltp, vwap, bullish, bearish, market_time=tick_time)
+        event['threshold'] = threshold
         self.latest_results[token] = event
+        history = getattr(self, 'history', None)
+        if history:
+            self._record_history('evaluation', event)
+            # Archive indicator series once per 5m candle; finalization refreshes
+            # the closing series. Rule evaluations retain their exact live state.
+            if self._archived_chart_candles.get(token) != event['candle']['time']:
+                if self._archive_charts(sd, event):
+                    self._archived_chart_candles[token] = event['candle']['time']
 
         # Freeze the last live state as the signal for the candle that just closed.
         confirmed_signal = None
@@ -657,9 +670,11 @@ class RealtimeScanner:
                     f"{result.percentage:.1f}% conditions passed "
                     f"({result.passed}/{result.total}):\n     • {passed_text}"
                 )
-                notifier.send_alert(sd.symbol, is_bullish=is_bullish,
+                sent = notifier.send_alert(sd.symbol, is_bullish=is_bullish,
                                     condition_str=condition_str, price=ltp,
                                     cooldown_key=key)
+                if sent and history:
+                    self._record_history("alert", {**event, "alert_side": result.side})
 
         if self.event_callback:
             self.event_callback(event)
@@ -681,6 +696,24 @@ class RealtimeScanner:
                 self.processing_error = str(exc)
                 print(f'[EVALUATION ERROR] {exc}')
 
+    def _record_history(self, kind, event):
+        try:
+            self.history.record(kind, event)
+        except Exception as exc:
+            self.history_error = str(exc)
+            print(f'[HISTORY ERROR] {exc}')
+
+    def _archive_charts(self, sd, event):
+        try:
+            day = datetime.fromtimestamp(event['candle']['time'], MARKET_TZ).date().isoformat()
+            self.history.save_charts(sd.instrument_token, day, {
+                tf: chart_snapshot(sd, tf, limit=300) for tf in SUPPORTED_TIMEFRAMES})
+            return True
+        except Exception as exc:
+            self.history_error = str(exc)
+            print(f'[HISTORY ERROR] {exc}')
+            return False
+
     def _confirm_once(self, token, prior):
         if not prior or not prior.get('candle'):
             return None
@@ -692,6 +725,8 @@ class RealtimeScanner:
         # Store an immutable-in-practice shallow copy without nested signal history.
         signal = {key: value for key, value in prior.items() if key != 'confirmed_signal'}
         previous = self.confirmed_signals.setdefault(token, [])
+        if getattr(self, 'history', None):
+            self._record_history('confirmed', signal)
         previous.append(signal)
         del previous[:-200]
         return signal
@@ -708,6 +743,9 @@ class RealtimeScanner:
                 if now < end:
                     continue
                 signal = self._confirm_once(token, prior)
+                if signal and getattr(self, 'history', None):
+                    with self.symbol_data[token]._lock:
+                        self._archive_charts(self.symbol_data[token], prior)
                 if signal and self.event_callback:
                     self.event_callback({**prior, 'confirmed_signal': signal})
 

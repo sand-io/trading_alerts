@@ -56,7 +56,7 @@ const chartMocks=[];
 const nodes=new Map(),node=()=>({style:{},classList:{toggle(){}},children:[],value:'',append(){},replaceChildren(...children){this.children=children;this.value=children[0]?.value??''},setAttribute(){}});
 const document={getElementById(id){if(!nodes.has(id))nodes.set(id,node());return nodes.get(id)},createElement:node,querySelectorAll(){return []}};
 const context=vm.createContext({document,KiteStrategyIndicator:{createStrategyIndicator},
- LightweightCharts:{CrosshairMode:{Normal:0},createChart(){chartCount++;const mock={...chart,range:null,removeSeries(){},timeScale(){return {subscribeVisibleLogicalRangeChange(callback){mock.rangeCallback=callback},getVisibleLogicalRange(){return mock.range},setVisibleLogicalRange(range){mock.range=range;mock.rangeCallback?.(range)}}},addCandlestickSeries(){return {setData(){},setMarkers(){},update(){}}},subscribeCrosshairMove(){},applyOptions(){}};chartMocks.push(mock);return mock}},
+ LightweightCharts:{CrosshairMode:{Normal:0},createChart(){chartCount++;const mock={...chart,range:null,removeSeries(){},timeScale(){return {subscribeVisibleLogicalRangeChange(callback){mock.rangeCallback=callback},getVisibleLogicalRange(){return mock.range},setVisibleLogicalRange(range){mock.range=range;mock.rangeCallback?.(range)}}},addCandlestickSeries(){return {setData(){},setMarkers(){},update(){}}},subscribeClick(callback){mock.clickCallback=callback},subscribeCrosshairMove(){},applyOptions(){}};chartMocks.push(mock);return mock}},
  ResizeObserver:class{observe(){}},setInterval(){},clearInterval(){},clearTimeout(){},
  fetch(){return new Promise(()=>{})},window:{},console});
 vm.runInContext(html.split('<script>')[1].split('</script>')[0],context);
@@ -112,3 +112,7 @@ async function testSearchSelection(){
  console.log('Dashboard layout, symbol selection and search clearing, studies, and legacy score fidelity tests passed');
 }
 testSearchSelection().catch(error=>{console.error(error);process.exitCode=1});
+
+vm.runInContext("reviewMode=true;reviewEvents=[{candle:{time:1},market_time:'2026-10-08T10:00:00+05:30',instrument_token:1,price:100,vwap:99,threshold:70,bullish:{passed:1,total:1,percentage:100,rules:[]},bearish:{passed:0,total:1,percentage:0,rules:[]}}];currentTimeframe='5m'",context);
+chartMocks[0].clickCallback({time:1});
+assert.ok(nodes.get('strategyContext').textContent.includes('Saved live evaluation'));

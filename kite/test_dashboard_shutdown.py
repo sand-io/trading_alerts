@@ -257,7 +257,7 @@ class TestDashboardShutdown(unittest.IsolatedAsyncioTestCase):
     async def test_split_snapshot_does_not_compute_unused_replay(self):
         data = SimpleNamespace(symbol='NSE:TEST')
         scanner = SimpleNamespace(symbol_data={1: data},latest_results={1: {'existing': True}},
-                                  confirmed_signals={},alert_threshold=30)
+                                  confirmed_signals={},alert_threshold=30, history=Mock())
         with patch.object(dashboard, 'scanner', scanner), patch.object(dashboard, 'chart_snapshot', return_value={'candles': []}):
             result = dashboard.snapshot(1)
         self.assertNotIn('indicator_history', result)

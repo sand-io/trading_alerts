@@ -9,6 +9,7 @@ import json
 import os
 import threading
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -214,6 +215,7 @@ async def health():
         "symbols": len(scanner.token_to_symbol),
         "threshold": scanner.alert_threshold,
         "processing_error": getattr(scanner, 'processing_error', None),
+        "history_error": getattr(scanner, 'history_error', None),
         "pending_tick_batches": scanner._tick_queue.qsize(),
         "pending_evaluations": len(scanner._pending_evaluations),
         "feed_age_seconds": scanner.feed_age_seconds(),
@@ -244,10 +246,37 @@ def snapshot(instrument_token: int, timeframe: str = "5m"):
         "instrument_token": instrument_token,
         "strategy": strategy,
         "market": getattr(scanner, 'latest_market_results', {}).get(instrument_token),
-        "signals": scanner.confirmed_signals.get(instrument_token, []),
+        "signals": scanner.history.events(instrument_token,
+            datetime.now(ZoneInfo('Asia/Kolkata')).date().isoformat(),
+            'confirmed'),
         "threshold": scanner.alert_threshold,
     })
     return payload
+
+
+@app.get("/api/history/{instrument_token}/dates")
+def history_dates(instrument_token: int):
+    return scanner.history.days(instrument_token)
+
+
+@app.get("/api/history/{instrument_token}/{day}")
+def history_day(instrument_token: int, day: str, timeframe: str = "5m"):
+    try:
+        datetime.strptime(day, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(400, "Date must be YYYY-MM-DD")
+    if timeframe not in SUPPORTED_TIMEFRAMES:
+        raise HTTPException(400, "Unsupported timeframe")
+    chart = scanner.history.chart(instrument_token, day, timeframe)
+    if chart is None:
+        raise HTTPException(404, "No recorded chart for this date")
+    evaluations = scanner.history.events(instrument_token, day, 'evaluation')
+    return {**chart, "instrument_token": instrument_token, "day": day,
+            "strategy": evaluations[-1] if evaluations else None,
+            "threshold": evaluations[-1].get('threshold') if evaluations else None,
+            "signals": scanner.history.events(instrument_token, day, 'confirmed'),
+            "alerts": scanner.history.events(instrument_token, day, 'alert'),
+            "evaluations": evaluations}
 
 
 @app.websocket("/ws/{instrument_token}")
