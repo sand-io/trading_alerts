@@ -181,6 +181,17 @@ def live_study_values(symbol_data, timeframe: str) -> dict[str, Any]:
     return {"timeframe": timeframe, "studies": compact}
 
 
+def missing_rule_timeframes(symbol_data, bullish_conditions, bearish_conditions):
+    """No directional signals while a strategy's input timeframe is absent."""
+    required = set()
+    for rule in list(bullish_conditions) + list(bearish_conditions):
+        if rule.interval != 'tick':
+            required.add(rule.interval)
+        if rule.rule_type in ('yesterday_compare', 'multi_day_close', 'opening_or_previous_day'):
+            required.add('1d')
+    return sorted(interval for interval in required if symbol_data.get_dataframe(interval).empty)
+
+
 def historical_evaluation(symbol_data, bullish_conditions, bearish_conditions,
                           threshold: float):
     """Read-only fallback; never emits alerts or creates confirmed signals."""
@@ -196,7 +207,11 @@ def historical_evaluation(symbol_data, bullish_conditions, bearish_conditions,
     bearish = evaluate_side('bearish', bearish_conditions, price, vwap,
                             symbol_data, threshold)
     bullish, bearish = resolve_direction(bullish, bearish)
+    missing = missing_rule_timeframes(symbol_data, bullish_conditions, bearish_conditions)
+    if missing:
+        bullish, bearish = replace(bullish, triggered=False), replace(bearish, triggered=False)
     event = live_event(symbol_data, price, vwap, bullish, bearish)
+    event.update(data_ready=not missing, missing_timeframes=missing)
     event['evaluation_source'] = 'historical'
     event['as_of'] = _epoch_seconds(row['time'])
     return event
@@ -359,3 +374,80 @@ def live_event(symbol_data, ltp: float, vwap: float, bullish: SideResult,
         "bullish": bullish.to_dict(),
         "bearish": bearish.to_dict(),
     }
+
+
+def profile_chart_snapshot(symbol_data, timeframe, profile, limit=300, base=None):
+    """Archive the indicators used by this profile with its shared candle history."""
+    chart = dict(base) if base is not None else chart_snapshot(symbol_data, timeframe, limit)
+    frame = symbol_data.get_dataframe(timeframe).tail(limit).copy()
+    chart.update(strategy_id=profile['id'], strategy_version=profile['version'])
+    if frame.empty:
+        return chart
+    conditions = [rule for rule in profile['bullish'] + profile['bearish'] if rule.interval == timeframe]
+    if not conditions:
+        return chart
+    overlays, studies = {}, {}
+    colors = ('#3d9df5', '#f2b84b', '#a78bfa', '#38c7d9')
+
+    def ema_overlay(period, source='close'):
+        identifier = ('haema' if source == 'ha_close' else 'ema') + str(period)
+        if identifier in overlays:
+            return
+        values = calculate_heikin_ashi(frame)['close'] if source == 'ha_close' else frame['close']
+        overlays[identifier] = {'id': identifier, 'label': ('HA EMA ' if source == 'ha_close' else 'EMA ') + str(period),
+            'period': period, 'source': source, 'color': colors[len(overlays) % len(colors)],
+            'default_visible': True, 'points': _series_points(frame, calculate_ema(values, period))}
+
+    def study(identifier, label, lines, levels=None, format='number'):
+        studies[identifier] = {'id': identifier, 'label': label, 'format': format,
+            'default_visible': True, 'lines': [{'id': line_id, 'label': name,
+                'color': colors[index % len(colors)], 'points': _series_points(frame, values)}
+                for index, (line_id, name, values) in enumerate(lines)], 'levels': levels or []}
+
+    for rule in conditions:
+        params, kind = rule.params, rule.rule_type
+        if kind in ('close_ema', 'prev_close_ema'):
+            ema_overlay(params['ema_period'])
+        elif kind in ('ema_ema', 'ha_ema_ema'):
+            source = 'ha_close' if kind == 'ha_ema_ema' else 'close'
+            for period in (params['ema1'], params['ema2']):
+                ema_overlay(period, source)
+        elif kind == 'close_vwap':
+            overlays['vwap'] = {'id': 'vwap', 'label': 'VWAP', 'period': None, 'source': 'vwap',
+                'color': '#a78bfa', 'default_visible': True,
+                'points': _series_points(frame, frame.get('vwap', pd.Series(index=frame.index, dtype=float)))}
+        elif kind in ('rsi', 'rsi_bands', 'rsi_bearish_bands'):
+            period = params['period']
+            identifier = f'rsi{period}'
+            levels = {level['value']: level for level in studies.get(identifier, {}).get('levels', [])}
+            for key in ('value', 'lower', 'upper', 'breakout', 'breakdown'):
+                if key in params:
+                    levels[params[key]] = {'value': params[key], 'label': str(params[key]), 'color': '#627287'}
+            study(identifier, f'RSI ({period})', [(identifier, 'RSI', calculate_rsi(frame['close'], period))], list(levels.values()))
+        elif kind == 'macd':
+            fast, slow, signal = params['fast'], params['slow'], params['signal']
+            values, signals = calculate_macd(frame, fast, slow, signal)
+            identifier = f'macd{fast}_{slow}_{signal}'
+            study(identifier, f'MACD ({fast},{slow},{signal})', [(identifier, 'MACD', values),
+                (identifier + '_signal', 'Signal', signals)], [{'value': 0, 'label': 'Zero', 'color': '#627287'}])
+        elif kind == 'obv_ema':
+            period = params['ema_period']
+            values = calculate_obv(frame)
+            study(f'obv{period}', f'OBV / EMA ({period})', [('obv', 'OBV', values),
+                (f'obvema{period}', f'OBV EMA {period}', calculate_ema(values, period))])
+        elif kind == 'adx':
+            period = params['period']
+            study(f'adx{period}', f'ADX ({period})', [(f'adx{period}', 'ADX', calculate_adx(frame, period))],
+                  [{'value': params['value'], 'label': str(params['value']), 'color': '#627287'}])
+        elif kind == 'volume_previous_max':
+            period = params['period']
+            study(f'volume{period}', f'Volume / previous {period} max', [('volume', 'Volume', frame['volume']),
+                  ('previous_volume_max', f'Previous {period} max', frame['volume'].shift(1).rolling(period).max())])
+        elif kind == 'range_atr':
+            count, period, multiplier = params['candles'], params['atr_period'], params['multiplier']
+            values = frame['high'].rolling(count).max() - frame['low'].rolling(count).min()
+            study('range_atr', 'Range / ATR', [('range', f'{count}-candle range', values),
+                  ('atr_multiple', f'{multiplier:g} x ATR ({period})', calculate_atr(frame, period) * multiplier)], format='price')
+    chart['overlays'] = list(overlays.values())
+    chart['studies'] = list(studies.values())
+    return chart

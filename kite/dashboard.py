@@ -16,7 +16,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse
 
-from scanner import RealtimeScanner, strategy_log
+from scanner import RealtimeScanner, strategy_log, history_requests
 from strategy_runtime import SUPPORTED_TIMEFRAMES, chart_snapshot, live_study_values, historical_evaluation
 
 
@@ -222,6 +222,9 @@ async def health():
         "threshold": scanner.alert_threshold,
         "processing_error": getattr(scanner, 'processing_error', None),
         "history_error": getattr(scanner, 'history_error', None),
+        "recording_strategies": list(getattr(scanner, 'recording_profiles', {})),
+        "strategy_errors": getattr(scanner, 'profile_errors', {}),
+        "historical_requests": history_requests.stats(),
         "pending_tick_batches": scanner._tick_queue.qsize(),
         "pending_evaluations": len(scanner._pending_evaluations),
         "feed_age_seconds": scanner.feed_age_seconds(),
@@ -259,6 +262,8 @@ def snapshot(instrument_token: int, timeframe: str = "5m"):
             raise HTTPException(400, f"Timeframe must be one of: {', '.join(SUPPORTED_TIMEFRAMES)}")
         payload = chart_snapshot(symbol_data, timeframe=timeframe)
         strategy = scanner.latest_results.get(instrument_token)
+        if strategy is not None and hasattr(scanner, 'active_strategy') and strategy.get('strategy_version') is not None and strategy['strategy_version'] != scanner.active_strategy['version']:
+            strategy = None
         if strategy is None:
             with symbol_data._lock:
                 strategy = historical_evaluation(symbol_data, scanner.bullish_conditions,
@@ -285,6 +290,15 @@ def history_dates(instrument_token: int):
     return scanner.history.days(instrument_token)
 
 
+@app.get('/api/history/{instrument_token}/{day}/strategies')
+def history_strategies(instrument_token: int, day: str):
+    try:
+        datetime.strptime(day, '%Y-%m-%d')
+    except ValueError:
+        raise HTTPException(400, 'Date must be YYYY-MM-DD')
+    return scanner.history.session_strategies(instrument_token, day)
+
+
 @app.get("/api/history/{instrument_token}/{day}")
 def history_day(instrument_token: int, day: str, timeframe: str = "5m", strategy_id: str | None = None):
     try:
@@ -293,7 +307,8 @@ def history_day(instrument_token: int, day: str, timeframe: str = "5m", strategy
         raise HTTPException(400, "Date must be YYYY-MM-DD")
     if timeframe not in SUPPORTED_TIMEFRAMES:
         raise HTTPException(400, "Unsupported timeframe")
-    chart = scanner.history.chart(instrument_token, day, timeframe)
+    chart = (scanner.history.strategy_chart(instrument_token, day, timeframe, strategy_id)
+             if strategy_id else scanner.history.chart(instrument_token, day, timeframe))
     if chart is None:
         raise HTTPException(404, "No recorded chart for this date")
     evaluations = scanner.history.events(instrument_token, day, 'evaluation', strategy_id)

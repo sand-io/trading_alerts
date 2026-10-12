@@ -53,8 +53,8 @@ assert.equal(series[0].points[0].value,undefined);
 assert.ok(indicator.readout().includes('No strategy evaluation'));
 let chartCount=0;
 const chartMocks=[];
-const nodes=new Map(),node=()=>({style:{},classList:{toggle(){}},children:[],value:'',append(){},replaceChildren(...children){this.children=children;this.value=children[0]?.value??''},setAttribute(){}});
-const document={getElementById(id){if(!nodes.has(id))nodes.set(id,node());return nodes.get(id)},createElement:node,querySelectorAll(){return []}};
+const nodes=new Map(),node=()=>({style:{},classList:{toggle(){}},children:[],value:'',append(...items){this.children.push(...items)},replaceChildren(...children){this.children=children;this.value=children[0]?.value??''},setAttribute(key,value){this[key]=value},removeAttribute(key){delete this[key]}});
+const document={getElementById(id){if(!nodes.has(id))nodes.set(id,node());return nodes.get(id)},createElement:node,addEventListener(){},querySelectorAll(){return []}};
 const context=vm.createContext({document,KiteStrategyIndicator:{createStrategyIndicator},
  LightweightCharts:{CrosshairMode:{Normal:0},createChart(){chartCount++;const mock={...chart,range:null,removeSeries(){},timeScale(){return {subscribeVisibleLogicalRangeChange(callback){mock.rangeCallback=callback},getVisibleLogicalRange(){return mock.range},setVisibleLogicalRange(range){mock.range=range;mock.rangeCallback?.(range)}}},addCandlestickSeries(){return {setData(){},setMarkers(){},update(){}}},subscribeClick(callback){mock.clickCallback=callback},subscribeCrosshairMove(){},applyOptions(){}};chartMocks.push(mock);return mock}},
  ResizeObserver:class{observe(){}},setInterval(){},clearInterval(){},clearTimeout(){},
@@ -80,36 +80,52 @@ vm.runInContext("renderMarket({instrument_token:1,market_time:'2026-10-08T13:43:
 assert.equal(nodes.get('price').textContent,'100.00');
 assert.equal(vm.runInContext("marketIsCurrent({instrument_token:1,market_time:'2026-10-08T13:39:00+05:30'})",context),false);
 async function testSearchSelection(){
- vm.runInContext("allSymbols=[{token:1,symbol:'NFO:RELIANCE26OCTFUT'},{token:2,symbol:'NFO:TCS26OCTFUT'}];currentToken=null;renderSymbolOptions()",context);
- const select=nodes.get('symbol');
- assert.equal(select.value,'1'); // startup still selects the first configured symbol
- vm.runInContext("currentToken=1;renderSymbolOptions('tcs')",context);
- assert.equal(select.value,''); // filtering must not silently select an unloaded chart
- assert.equal(select.children[0].disabled,true);
- assert.equal(select.children[1].value,'2');
- assert.equal(vm.runInContext('currentToken',context),1);
- vm.runInContext("globalThis.loadedTokens=[];globalThis.connectedTokens=[];loadSnapshot=async token=>loadedTokens.push(token);connect=token=>connectedTokens.push(token)",context);
- select.value='2';
- await vm.runInContext('chooseSymbol()',context);
- assert.equal(vm.runInContext('currentToken',context),2);
- assert.equal(vm.runInContext('loadedTokens.join()',context),'2');
- assert.equal(vm.runInContext('connectedTokens.join()',context),'2');
- vm.runInContext("renderSymbolOptions('')",context);
- assert.equal(select.value,'2'); // clearing the search preserves the newly loaded chart
- vm.runInContext("renderSymbolOptions('missing')",context);
- assert.equal(select.disabled,true);
- assert.equal(select.value,'');
- await vm.runInContext('chooseSymbol()',context);
- assert.equal(vm.runInContext('loadedTokens.length',context),1);
- assert.equal(vm.runInContext('currentToken',context),2);
- vm.runInContext("symbolSearch.value='rel'",context);
- await vm.runInContext('selectFirstSearchResult()',context);
- assert.equal(select.disabled,false);
- assert.equal(vm.runInContext('currentToken',context),1);
- assert.equal(vm.runInContext('loadedTokens.join()',context),'2,1');
- vm.runInContext("renderSymbolOptions('')",context);
- assert.equal(select.value,'1');
- console.log('Dashboard layout, symbol selection and search clearing, studies, and legacy score fidelity tests passed');
+ const pickerNodes=new Map(),listeners={};
+ const pickerDocument={getElementById(id){if(!pickerNodes.has(id))pickerNodes.set(id,node());return pickerNodes.get(id)},createElement:node,addEventListener(type,callback){listeners[type]=callback}};
+ const picker={document:pickerDocument,currentToken:null,allSymbols:[{token:1,symbol:'NFO:RELIANCE26OCTFUT'},{token:2,symbol:'NFO:TCS26OCTFUT'},{token:3,symbol:'NSE:RELIANCE'}],reviewMode:false,socket:null,
+  loadSnapshot:async token=>picker.loaded.push(token),loadRecordedSelection:async token=>picker.reviewed.push(token),connect:token=>picker.connected.push(token),setStatus(){},loaded:[],reviewed:[],connected:[]};
+ picker.symbolSelect=pickerDocument.getElementById('symbol');picker.symbolSearch=pickerDocument.getElementById('symbolSearch');
+ const search=vm.createContext(picker);
+ vm.runInContext(html.slice(html.indexOf('async function chooseSymbol('),html.indexOf("document.querySelectorAll('.tf-btn')")),search);
+ await vm.runInContext('selectSymbol(allSymbols[0])',search);
+ assert.equal(picker.currentToken,1);assert.deepEqual(picker.loaded,[1]);
+ assert.equal(picker.symbolSearch.value,'NFO:RELIANCE26OCTFUT');
+ picker.symbolSearch.onfocus();assert.equal(pickerNodes.get('symbolResults').hidden,false);
+ assert.equal(picker.symbolSearch['aria-expanded'],'true');
+ picker.symbolSearch.value='tcs';picker.symbolSearch.oninput();
+ const results=pickerNodes.get('symbolOptions');
+ assert.equal(results.children.length,1);assert.equal(results.children[0].children[0].children[0].textContent,'TCS26OCTFUT');
+ assert.equal(picker.currentToken,1);assert.deepEqual(picker.loaded,[1]); // typing never changes the chart
+ await results.children[0].onclick();
+ assert.equal(picker.currentToken,2);assert.deepEqual(picker.loaded,[1,2]);
+ assert.equal(pickerNodes.get('symbolResults').hidden,true);assert.equal(picker.symbolSearch.value,'NFO:TCS26OCTFUT');
+ // Exact symbols precede prefixes; exchange and punctuation are optional.
+ assert.equal(vm.runInContext("matchingSymbols(allSymbols,'reliance')[0].token",search),3);
+ assert.equal(vm.runInContext("matchingSymbols(allSymbols,'nfo tcs')[0].token",search),2);
+ picker.symbolSearch.value='missing';picker.symbolSearch.oninput();
+ assert.ok(results.children[0].textContent.includes('No matching stocks'));
+ picker.symbolSearch.onkeydown({key:'Enter',preventDefault(){}});
+ assert.deepEqual(picker.loaded,[1,2]);assert.equal(picker.currentToken,2);
+ picker.symbolSearch.onkeydown({key:'Escape',preventDefault(){}});
+ assert.equal(picker.symbolSearch.value,'NFO:TCS26OCTFUT');assert.equal(pickerNodes.get('symbolResults').hidden,true);
+ pickerDocument.getElementById('symbolClear').onclick();
+ assert.equal(picker.symbolSearch.value,'');assert.equal(results.children.length,3);
+ picker.symbolSearch.onkeydown({key:'ArrowDown',preventDefault(){}});
+ assert.equal(picker.symbolSearch['aria-activedescendant'],'symbol-option-0');
+ picker.symbolSearch.onkeydown({key:'ArrowUp',preventDefault(){}}); // wrap to last
+ assert.equal(picker.symbolSearch['aria-activedescendant'],'symbol-option-2');
+ picker.symbolSearch.onkeydown({key:'Enter',preventDefault(){}});
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(picker.currentToken,3);assert.deepEqual(picker.loaded,[1,2,3]);
+ // The same selection makes no redundant snapshot call.
+ await vm.runInContext('selectSymbol(allSymbols[2])',search);assert.deepEqual(picker.loaded,[1,2,3]);
+ picker.reviewMode=true;
+ picker.symbolSearch.onfocus();picker.symbolSearch.value='tcs';picker.symbolSearch.oninput();
+ await results.children[0].onclick();assert.deepEqual(picker.reviewed,[2]);
+ picker.symbolSearch.onfocus();picker.symbolSearch.value='unfinished';
+ listeners.click({target:{closest:()=>null}});
+ assert.equal(pickerNodes.get('symbolResults').hidden,true);assert.equal(picker.symbolSearch.value,'NFO:TCS26OCTFUT');
+ console.log('Symbol picker immediate results, click selection, keyboard navigation, ranking, empty states, and recorded review tests passed');
 }
 testSearchSelection().catch(error=>{console.error(error);process.exitCode=1});
 
@@ -134,3 +150,86 @@ async function testStrategySync(){
  await vm.runInContext("refreshStrategyState({id:'trend',version:'v2'})",syncContext);assert.equal(calls,1);
 }
 testStrategySync().catch(error=>{console.error(error);process.exitCode=1});
+
+async function testRecordedStrategySelection(){
+ const reviewNodes=new Map(),requests=[];
+ const reviewDocument={getElementById(id){if(!reviewNodes.has(id))reviewNodes.set(id,node());return reviewNodes.get(id)},createElement:node};
+ reviewDocument.getElementById('reviewDate').value='2026-10-12';
+ const reviewContext=vm.createContext({document:reviewDocument,activeStrategyId:'default',reviewStrategyId:null,currentToken:1,reviewRequest:0,reviewMode:true,
+  fetch:async url=>{requests.push(url);return {ok:true,json:async()=>[{id:'default',name:'Default',evaluations:10},{id:'removed',name:'Archived profile',evaluations:8}]}},
+  loadSnapshot:async token=>requests.push('snapshot:'+token)});
+ vm.runInContext(html.slice(html.indexOf('async function loadReviewStrategies('),html.indexOf("document.getElementById('reviewButton').onclick")),reviewContext);
+ await vm.runInContext('loadReviewStrategies(1)',reviewContext);
+ assert.equal(reviewContext.reviewStrategyId,'default');
+ await reviewDocument.getElementById('reviewStrategy').onchange({target:{value:'removed'}});
+ assert.equal(reviewContext.reviewStrategyId,'removed');
+ assert.equal(reviewContext.activeStrategyId,'default');
+ assert.equal(requests.at(-1),'snapshot:1');
+ assert.ok(requests.every(url=>!url.includes('/activate')));
+ assert.equal(reviewDocument.getElementById('reviewStrategy').children[1].textContent,'Archived profile (8 evaluations)');
+}
+testRecordedStrategySelection().catch(error=>{console.error(error);process.exitCode=1});
+
+async function testRecordedSessionIsolation(){
+ const sessionNodes=new Map(),pending=[];
+ const sessionDocument={getElementById(id){if(!sessionNodes.has(id))sessionNodes.set(id,node());return sessionNodes.get(id)},createElement:node};
+ sessionDocument.getElementById('reviewDate').value='2026-10-12';
+ const sandbox={document:sessionDocument,console,window:{},reviewMode:true,reviewEvents:[],reviewAlerts:[],reviewFilter:'alerts',reviewRequest:0,
+  currentToken:1,currentTimeframe:'5m',reviewStrategyId:'default',activeStrategyId:'default',allSymbols:[{token:1,symbol:'FIRST'},{token:2,symbol:'SECOND'}],
+  candles:{setData(){}},refreshMarkers(){},configureOverlays(){},configureStudies(){},renderOhlc(){},applyLevels(){},resetVisibleRange(){},
+  markers:()=>[],renderSide(){},renderLive(){},renderMarket(){},inspectSaved(event){sandbox.inspected=event},
+  fetch:url=>new Promise(resolve=>pending.push({url,resolve}))};
+ const session=vm.createContext(sandbox);
+ vm.runInContext(html.slice(html.indexOf('function resetHistory('),html.indexOf('chart.subscribeClick')),session);
+ vm.runInContext(html.slice(html.indexOf('let snapshotRequest='),html.indexOf('function updateCandle(')),session);
+ const selectionCode=html.slice(html.indexOf('async function loadReviewStrategies('),html.indexOf('function matchingSymbols('));
+ vm.runInContext(selectionCode,session);
+ const evaluation={...event(1,100,0),market_time:'2026-10-12T10:00:00+05:30',alert_side:'bullish'};
+ const recorded={candles:[],signals:[],overlays:[],studies:[],evaluations:[evaluation],alerts:[evaluation],threshold:90};
+ vm.runInContext('renderHistory',session)(recorded);
+ assert.equal(sessionNodes.get('historyEvents').children.length,1);
+ sessionNodes.get('historyEvents').children[0].onclick();assert.equal(sandbox.inspected,evaluation);
+ // Switching clears the old events immediately, before any network response.
+ sandbox.currentToken=2;
+ const missing=vm.runInContext('loadRecordedSelection(2)',session);
+ assert.equal(sessionNodes.get('historyEvents').children.length,0);
+ assert.equal(sessionNodes.get('sessionAlertCount').textContent,'—');
+ assert.equal(sessionNodes.get('sessionContext').textContent,'SECOND · 2026-10-12 · IST');
+ assert.equal(sandbox.reviewEvents.length,0);
+ pending.shift().resolve({ok:true,json:async()=>[]});await new Promise(resolve=>setImmediate(resolve));
+ pending.shift().resolve({ok:false,text:async()=>'{"detail":"No recorded chart for this date"}'});await missing;
+ assert.equal(sessionNodes.get('historyEvents').children.length,0);
+ assert.equal(sessionNodes.get('sessionState').textContent,'No recording');
+ assert.equal(sessionNodes.get('sessionAlertCount').textContent,'0');
+ // A valid recording with evaluations and zero alerts has an explicit alert empty state.
+ const zero=vm.runInContext('loadSnapshot(2)',session);
+ pending.shift().resolve({ok:true,json:async()=>({...recorded,alerts:[]})});await zero;
+ assert.equal(sessionNodes.get('historyEvents').children.length,0);
+ assert.equal(sessionNodes.get('sessionEmptyTitle').textContent,'No alerts sent');
+ sessionNodes.get('sessionEvaluations').onclick();
+ assert.equal(sessionNodes.get('historyEvents').children.length,1);
+ assert.equal(sessionNodes.get('sessionEvaluationCount').textContent,1);
+ // Slow old symbol responses cannot restore their events over the current selection.
+ sandbox.currentToken=1;const old=vm.runInContext('loadSnapshot(1)',session);const oldRequest=pending.shift();
+ sandbox.currentToken=2;const fresh=vm.runInContext('loadSnapshot(2)',session);
+ pending.shift().resolve({ok:true,json:async()=>({...recorded,evaluations:[],alerts:[]})});await fresh;
+ oldRequest.resolve({ok:true,json:async()=>recorded});await old;
+ assert.equal(sessionNodes.get('historyEvents').children.length,0);
+ assert.equal(sandbox.reviewEvents.length,0);
+ // The profile discovery response is also guarded, including changes of date.
+ const oldProfiles=vm.runInContext('loadReviewStrategies(2)',session);const profileRequest=pending.shift();
+ sessionNodes.get('reviewDate').value='2026-10-13';
+ const newProfiles=vm.runInContext('loadReviewStrategies(2)',session);
+ pending.shift().resolve({ok:true,json:async()=>[{id:'new',name:'New session',evaluations:1}]});await newProfiles;
+ profileRequest.resolve({ok:true,json:async()=>[{id:'old',name:'Old session',evaluations:1}]});await oldProfiles;
+ assert.equal(sandbox.reviewStrategyId,'new');
+ assert.equal(sessionNodes.get('reviewStrategy').children[0].textContent,'New session (1 evaluations)');
+ // Errors clear both the list and inspected data rather than leaving prior alerts behind.
+ const failed=vm.runInContext('loadSnapshot(2)',session);
+ pending.shift().resolve({ok:false,text:async()=> 'Server unavailable'});
+ await assert.rejects(failed,/Server unavailable/);
+ assert.equal(sessionNodes.get('historyEvents').children.length,0);
+ assert.equal(sessionNodes.get('sessionState').textContent,'Unavailable');
+ console.log('Recorded session empty states, immediate clearing, event filters, and request race tests passed');
+}
+testRecordedSessionIsolation().catch(error=>{console.error(error);process.exitCode=1});

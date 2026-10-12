@@ -21,6 +21,9 @@ class HistoryStore:
                     candle INTEGER, payload TEXT, strategy TEXT NOT NULL DEFAULT 'default');
                 CREATE INDEX IF NOT EXISTS events_lookup ON events(token,day,kind);
 
+                CREATE TABLE IF NOT EXISTS strategy_charts (
+                    token INTEGER, day TEXT, timeframe TEXT, strategy TEXT, payload TEXT,
+                    PRIMARY KEY(token,day,timeframe,strategy));
                 CREATE TABLE IF NOT EXISTS charts (
                     token INTEGER, day TEXT, timeframe TEXT, payload TEXT,
                     PRIMARY KEY(token,day,timeframe));
@@ -28,6 +31,7 @@ class HistoryStore:
             columns = {row[1] for row in db.execute('PRAGMA table_info(events)')}
             if 'strategy' not in columns:
                 db.execute("ALTER TABLE events ADD COLUMN strategy TEXT NOT NULL DEFAULT 'default'")
+            db.execute('CREATE INDEX IF NOT EXISTS events_strategy_lookup ON events(token,day,strategy,kind)')
             db.execute('DROP INDEX IF EXISTS confirmed_once')
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS confirmed_strategy_once ON events(token,candle,strategy) WHERE kind='confirmed'")
 
@@ -74,3 +78,29 @@ class HistoryStore:
             row = db.execute('SELECT payload FROM charts WHERE token=? AND day=? AND timeframe=?',
                              (token, day, timeframe)).fetchone()
         return json.loads(row[0]) if row else None
+
+    def save_strategy_charts(self, token, day, strategy_id, charts):
+        with self.connect() as db:
+            db.executemany('INSERT OR REPLACE INTO strategy_charts VALUES(?,?,?,?,?)',
+                           [(token, day, tf, strategy_id, json.dumps(chart)) for tf, chart in charts.items()])
+
+    def strategy_chart(self, token, day, timeframe, strategy_id):
+        with self.connect() as db:
+            row = db.execute('SELECT payload FROM strategy_charts WHERE token=? AND day=? AND timeframe=? AND strategy=?',
+                             (token, day, timeframe, strategy_id)).fetchone()
+        return json.loads(row[0]) if row else self.chart(token, day, timeframe)
+
+    def session_strategies(self, token, day):
+        with self.connect() as db:
+            rows = db.execute("SELECT strategy,payload FROM events WHERE token=? AND day=? AND kind='evaluation' ORDER BY id", (token, day))
+            result = {}
+            for strategy_id, payload in rows:
+                event = json.loads(payload)
+                entry = result.setdefault(strategy_id, {'id': strategy_id, 'name': event.get('strategy_name', strategy_id),
+                                                        'evaluations': 0, 'versions': []})
+                entry['name'] = event.get('strategy_name', entry['name'])
+                entry['evaluations'] += 1
+                version = event.get('strategy_version')
+                if version and version not in entry['versions']:
+                    entry['versions'].append(version)
+        return list(result.values())

@@ -38,7 +38,7 @@ graph TD
    * `4h` candles are resampled on-the-fly using `1h` candles.
 5. **Grouped Condition Evaluation:** 
    * Every incoming tick updates candle OHLC and volume on the ingestion worker. Live chart events are published at most once per second per symbol (and immediately at candle rollover).
-   * A separate worker evaluates private candle snapshots from the active strategy JSON. Provisional evaluations for the same symbol/candle are combined; final snapshots from earlier candles are retained. The rule panel displays the evaluation timestamp separately from the latest market update.
+   * A separate worker evaluates all valid JSON strategies against shared private candle snapshots. Only the active strategy sends alerts. Provisional evaluations for the same symbol/candle are combined; final snapshots from earlier candles are retained. The rule panel displays the evaluation timestamp separately from the latest market update.
    * Desktop alerts are suppressed for evaluations more than ten seconds behind exchange time. The health endpoint reports pending tick batches and evaluations for monitoring processing load.
    * It counts the percentage of rules that evaluate to `True`.
 6. **Threshold-Based Alerts:** 
@@ -46,7 +46,7 @@ graph TD
    * If the percentage of passing conditions $\ge$ `threshold`, it triggers a grouped alert.
    * The alert lists exactly which conditions passed and the stock's current price.
 7. **Cooldown Filter:** The notifier applies a cooldown (e.g., 5 minutes) using a stable `cooldown_key` so that flickering condition counts do not cause alert spam. Desktop notifications use Notification Center on macOS, Windows notifications on Windows, and `notify-send`/libnotify on Linux; terminal output remains available when desktop notifications are unavailable.
-8. **Dynamic Configuration Reload:** Every 5 seconds, the scanner checks the modification timestamps of the active strategy JSON. If files have changed, it reloads the conditions and its threshold on-the-fly without interrupting the live WebSocket connection.
+8. **Dynamic Configuration Reload:** Every 5 seconds on incoming ticks, the scanner checks all strategy JSON profiles for changes. If files have changed, it reloads the conditions and its threshold on-the-fly without interrupting the live WebSocket connection.
 
 ---
 
@@ -222,8 +222,8 @@ The dashboard also supports a 3-minute chart with EMA 20/50 and optional VWAP, u
 
 ### Saved session review (SQLite)
 
-The scanner now records live rule evaluations (normally every five seconds per
-symbol), alerts accepted by the notifier after cooldown, and confirmed 5-minute
+The scanner now records live rule evaluations for every loaded valid strategy
+(normally every five seconds per symbol), alerts accepted by the notifier after cooldown, and confirmed 5-minute
 candle states in `kite/data/history.sqlite3`. Each evaluation saves its rule texts,
 pass/fail results, price, live VWAP, exchange timestamp, candle, and configured
 threshold. Alerts and confirmed candle marks are separate: an intrabar alert can
@@ -276,22 +276,28 @@ using letters, numbers, underscores or hyphens for the ID:
 ```
 
 Profiles use the existing condition language. Both rule lists must contain strings;
-one side may be empty. Invalid rules or thresholds reject activation. If required
-history cannot be loaded, the existing strategy remains active. Preparation pauses
+one side may be empty. Invalid rules or thresholds reject activation. If history is unavailable for a symbol, activation still succeeds and its missing
+intervals begin collecting live candles. Signals for that symbol remain suppressed
+while any rule-required timeframe is empty; indicators also need their normal
+lookback before their rules can pass. Terminal warnings include symbol, interval
+and the history error. Invalid profiles and persistence failures still retain the
+active strategy. Preparation pauses
 evaluation while preserving the feed connection. Cooldowns default to `config.json`
 when omitted and are isolated by strategy and rule version. Files are checked every
 five seconds on incoming ticks; invalid edits retain the last working rules.
 
-This version runs one strategy across all symbols. Chart studies remain the existing
-standard studies, and confirmed markers still use 5-minute candle rollover. Other
+This version evaluates and records all valid strategies across all symbols. Only
+the active strategy sends alerts. Live charts retain the standard studies; saved
+review uses each strategy's recorded indicators. Confirmed markers use 5-minute
+candle rollover. Other
 confirmation intervals, custom Python evaluators and a visual rule editor are not
 part of this version. All dashboard chart timeframes remain collected regardless
 of the profile's rule intervals.
 
 Evaluations and alerts carry the strategy name, ID and version. Existing database
 records are migrated to `default`; the original records remain intact. Saved-day
-review filters by the active strategy. Activate another profile to review its
-observations. Changing rules does not rewrite saved snapshots. The history API
+review has a separate **Recorded strategy** selector. Selecting another recorded
+profile does not change the active alert strategy. Changing rules does not rewrite saved snapshots. The history API
 also accepts `strategy_id`; omitting it returns all strategies for compatibility.
 
 Run strategy and existing regression checks from `kite`:
@@ -320,3 +326,69 @@ Refresh the page to discover newly added inactive profiles. Terminal `[STRATEGY]
 logs include startup state, activation/reload source, previous and new strategy,
 threshold, rule counts and version. Invalid edits retain working rules and log
 one warning per distinct error rather than repeating the warning every five seconds.
+
+
+### Record all strategies and review after market close
+
+Restart after this upgrade. All valid profiles present in `kite/strategies/` are
+loaded at startup and evaluated during the session using the same feed and candle
+snapshots. Evaluations, exact rule results, profile versions and confirmed 5-minute
+states are saved for every strategy. Alerts and live strategy broadcasts remain
+limited to the active profile. Switching the active strategy preserves the other
+profiles' recording state and queued observations.
+
+To compare recorded results, select a symbol and **Review date**, click **Review
+saved day**, then select **Recorded strategy** in the session panel. This selector
+loads that strategy's saved evaluations, alerts, bull/bear markers and indicator
+series. It does not activate the strategy. The list comes from recorded data, so
+profiles deleted from the strategy directory remain reviewable. Neutral confirmed
+states are also retained; a neutral state has no directional marker. The alert list
+contains only alerts actually accepted while that strategy was active.
+
+Saved indicators reflect each profile's configured periods: for example, BTST
+includes EMA(10), daily RSI with its band levels, hourly MACD(12,26,9), OBV with
+EMA(11), and hourly volume versus the preceding three-candle maximum. Indicator
+charts are checkpointed once per 5-minute candle and again at session close; an
+abrupt stop can leave the last checkpoint incomplete. Mid-session edits retain
+exact rule/version snapshots, while the chart checkpoint reflects the latest
+recorded profile settings. Existing archives without strategy-specific charts use
+their original shared chart checkpoint.
+
+This records observations going forward, not a backtest. Old sessions are not
+filled in for strategies that were not running. A newly added profile starts
+recording after discovery (normally within five seconds of incoming ticks), with
+no invented earlier observations. Invalid new files are excluded; invalid edits
+retain the last working rules and produce a terminal warning. Removed inactive
+profiles stop future recording, while their archive remains available.
+
+Recording cost and disk usage increase with strategy count. Historical candles and
+market subscriptions are shared, and the evaluation queue still combines redundant
+provisional work per symbol/candle. Monitor processing errors and pending work in
+`/api/health`, which also lists recording strategies and rejected profile errors.
+
+### Historical request pacing
+
+The live scanner uses one process-wide history request manager for startup and
+strategy preparation. Requests start at least 0.5 seconds apart (at most two per
+second), below Kite's documented three-per-second historical limit:
+https://kite.trade/docs/connect/v3/exceptions/#api-rate-limit.
+Rate-limit responses retry at most three total attempts, with increasing delays;
+the backoff applies to the next request too. Other API errors are not retried.
+Shutdown interrupts pacing/backoff waits.
+
+Each symbol's interval initialization is locked, so startup and strategy activation
+cannot independently initialize the same interval at the same time. Already
+initialized intervals are reused; merging prepared history never overwrites an
+interval that startup or live ingestion has populated in the meantime. Successful
+responses have a bounded, in-memory cache (64 entries, up to 60 seconds), allowing
+concurrent requests for the same token, timeframe and minute-normalized date window
+to reuse data. This cache does not persist across application restarts.
+
+The first warmup still needs a separate historical request per symbol/timeframe:
+167 symbols and five intervals can require about 835 requests, taking roughly
+seven minutes at two requests per second, plus network time and any backoff.
+Strategies share these candles; adding another strategy using those intervals does
+not multiply that history load. Live prices subsequently use KiteTicker ticks.
+Startup progress is logged every 25 symbols; `/api/health` includes
+`historical_requests` counters. This limiter covers this dashboard/scanner process,
+not separately launched pattern scanners, MTF tools or other API clients.

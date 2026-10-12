@@ -158,9 +158,9 @@ signal 9. No extra rule for time of day, entries, exits or stops has been added.
 Live evaluation uses the current/forming daily and hourly candles, including the
 current hourly volume, as permitted by the PDF. These states can change before
 close. The existing dashboard's confirmed markers still record at five-minute
-rollover; they do not certify that the hourly candle has closed. Existing standard
-chart studies are unchanged (for example, an EMA20/50 overlay is not this profile's
-EMA10 rule). The sidebar rule results are the BTST evaluation.
+rollover; they do not certify that the hourly candle has closed. Live charts retain the standard studies. Saved-session review records the BTST
+EMA(10), hourly MACD/OBV/volume studies, and daily RSI band levels. The sidebar
+rule results show the exact saved BTST evaluation.
 
 Parser additions: compound RSI bands (`rsi_bands`), volume above every prior candle
 (`volume_previous_max`), and Close versus Open (`close_open`). Existing rule

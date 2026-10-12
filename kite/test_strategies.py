@@ -40,7 +40,7 @@ class StrategyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.load('trend')
 
-    def test_switch_clears_stale_work_and_failed_switch_preserves_active(self):
+    def test_switch_preserves_recording_work_and_failed_switch_preserves_active(self):
         scanner = self.scanner()
         scanner.latest_results[1] = {'old': True}
         scanner._pending_evaluations[1] = ('old',)
@@ -48,7 +48,7 @@ class StrategyTests(unittest.TestCase):
         scanner.activate_strategy('trend')
         self.assertEqual(scanner.alert_threshold, 80)
         self.assertEqual(scanner.active_strategy['id'], 'trend')
-        self.assertEqual(scanner._pending_evaluations, {})
+        self.assertEqual(scanner._pending_evaluations, {1: ('old',)})
         self.assertEqual(scanner.latest_results, {})
         self.assertEqual(scanner._prior_results, {})
         generation = scanner._strategy_generation
@@ -57,16 +57,35 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(scanner._strategy_generation, generation)
         self.assertEqual(self.store.selected(), 'trend')
 
-    def test_failed_history_preparation_keeps_original_candles(self):
+    def test_missing_history_allows_activation_and_preserves_existing_candles(self):
         scanner = self.scanner()
-        data = SymbolData(1, 'TEST')
+        data = SymbolData(1, 'NFO:ICICIGI26OCTFUT')
+        original = [{'close': 100}]
+        data.intervals = {'5m'}
+        data.candles['5m'] = original
         scanner.symbol_data[1] = data
         scanner.kite = object()
-        with patch.object(SymbolData, 'initialize_historical_candles'):
-            with self.assertRaises(ValueError):
-                scanner.activate_strategy('trend')
-        self.assertEqual(data.candles, {})
-        self.assertEqual(scanner.active_strategy['id'], 'default')
+        with patch.object(SymbolData, 'initialize_historical_candles'), self.assertLogs('kite.strategy', level='WARNING') as logs:
+            scanner.activate_strategy('trend')
+        self.assertIs(data.candles['5m'], original)
+        self.assertIn('1h', data.intervals)
+        self.assertEqual(data.candles['1h'], [])
+        self.assertEqual(scanner.active_strategy['id'], 'trend')
+        self.assertEqual(self.store.selected(), 'trend')
+        self.assertTrue(any('ICICIGI26OCTFUT' in message and '[1h]' in message for message in logs.output))
+
+    def test_history_fetch_failures_capture_reason_and_do_not_block_activation(self):
+        from unittest.mock import Mock
+        scanner = self.scanner()
+        data = SymbolData(1, 'NFO:ICICIGI26OCTFUT')
+        scanner.symbol_data[1] = data
+        scanner.kite = Mock()
+        scanner.kite.historical_data.side_effect = RuntimeError('Temporary history request failure')
+        with self.assertLogs('kite.strategy', level='WARNING') as logs:
+            scanner.activate_strategy('trend')
+        self.assertEqual(scanner.active_strategy['id'], 'trend')
+        self.assertIn('Temporary history request failure', data.history_errors['1h'])
+        self.assertTrue(any('Temporary history request failure' in message for message in logs.output))
 
     def test_history_migration_and_strategy_confirmation_isolation(self):
         import sqlite3
