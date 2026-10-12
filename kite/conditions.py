@@ -1,5 +1,4 @@
 import re
-import os
 from datetime import datetime
 import pandas as pd
 import numpy as np
@@ -131,6 +130,49 @@ class Condition:
                 interval = f"{val}d"
         elif 'daily' in norm:
             interval = '1d'
+
+        # Bearish mirror of the bullish RSI bands under RSI -> 100 - RSI.
+        m = re.search(
+            r'\brsi\s*\((\d+)\)\s+is\s+greater than\s+(\d+(?:\.\d+)?)'
+            r'\s+and\s+less than or equal to\s+(\d+(?:\.\d+)?),?\s+or\s+less than or equal to\s+(\d+(?:\.\d+)?)$',
+            norm
+        )
+        if m:
+            lower, upper, breakdown = map(float, m.group(2, 3, 4))
+            if lower >= upper:
+                return None
+            return cls(text, interval, 'rsi_bearish_bands', {
+                'period': int(m.group(1)), 'lower': lower,
+                'upper': upper, 'breakdown': breakdown
+            })
+
+        # Compound RSI bands remain one rule so OR does not alter scoring.
+        m = re.search(
+            r'\brsi\s*\((\d+)\)\s+is\s+greater than or equal to\s+(\d+(?:\.\d+)?)'
+            r'\s+and\s+less than\s+(\d+(?:\.\d+)?),?\s+or\s+greater than or equal to\s+(\d+(?:\.\d+)?)$',
+            norm
+        )
+        if m:
+            lower, upper, breakout = map(float, m.group(2, 3, 4))
+            if lower >= upper:
+                return None
+            return cls(text, interval, 'rsi_bands', {
+                'period': int(m.group(1)), 'lower': lower,
+                'upper': upper, 'breakout': breakout
+            })
+
+        m = re.search(r'\bvolume\s+is\s+greater than\s+each of the previous\s+(\d+)\s+candles$', norm)
+        if m:
+            period = int(m.group(1))
+            if period < 1:
+                return None
+            return cls(text, interval, 'volume_previous_max', {'period': period})
+
+        m = re.search(r'\bclose\s+is\s+(greater than|less than|above|below|>|<)\s+open$', norm)
+        if m:
+            return cls(text, interval, 'close_open', {
+                'op': '>' if m.group(1) in ('greater than', 'above', '>') else '<'
+            })
 
         # 1. ADX, optionally requiring the latest ADX value to be rising.
         m = re.search(r'\badx\s*\(?(\d+)\)?\s+is\s+(greater than|less than|above|below|>|<)\s+(\d+(?:\.\d+)?)(?:\s+and\s+rising)?', norm)
@@ -469,7 +511,36 @@ class Condition:
         df.loc[latest_idx, 'vwap'] = vwap
 
         # Route to logic
-        if self.rule_type == 'adx':
+        if self.rule_type == 'rsi_bands':
+            values = calculate_rsi(df['close'], self.params['period'])
+            if values.empty or not np.isfinite(values.iloc[-1]):
+                return False
+            value = values.iloc[-1]
+            return (self.params['lower'] <= value < self.params['upper'] or
+                    value >= self.params['breakout'])
+
+        elif self.rule_type == 'rsi_bearish_bands':
+            values = calculate_rsi(df['close'], self.params['period'])
+            if values.empty or not np.isfinite(values.iloc[-1]):
+                return False
+            value = values.iloc[-1]
+            return (self.params['lower'] < value <= self.params['upper'] or
+                    value <= self.params['breakdown'])
+
+        elif self.rule_type == 'volume_previous_max':
+            period = self.params['period']
+            if len(df) < period + 1:
+                return False
+            previous = df['volume'].iloc[-period - 1:-1]
+            # Compare individually, excluding the trigger candle. Missing
+            # observations cannot silently reduce the required three candles.
+            return bool((df['volume'].iloc[-1] > previous).all())
+
+        elif self.rule_type == 'close_open':
+            opening = df['open'].iloc[-1]
+            return ltp > opening if self.params['op'] == '>' else ltp < opening
+
+        elif self.rule_type == 'adx':
             period = self.params['period']
             op = self.params['op']
             val = self.params['value']
@@ -750,19 +821,3 @@ class Condition:
                 return abs(val_left - val_right) < 1e-5
 
         return False
-
-def load_conditions_from_file(filename):
-    conditions = []
-    if not os.path.exists(filename):
-        return conditions
-    with open(filename, "r") as f:
-        for line in f:
-            line_str = line.strip()
-            if not line_str or line_str.startswith("#") or line_str.startswith("//"):
-                continue
-            cond = Condition.parse(line_str)
-            if cond:
-                conditions.append(cond)
-            else:
-                print(f"[WARNING] Could not parse condition: '{line_str}'")
-    return conditions

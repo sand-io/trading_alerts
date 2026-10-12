@@ -1,4 +1,5 @@
 import json
+import logging
 import math
 import os
 import queue
@@ -11,9 +12,9 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from kiteconnect import KiteConnect, KiteTicker
 
-from conditions import load_conditions_from_file
 from notifier import notifier
 from history import HistoryStore
+from strategies import StrategyStore
 from strategy_runtime import evaluate_side, live_event, resolve_direction
 from strategy_runtime import _candle_dict, SUPPORTED_TIMEFRAMES, chart_snapshot
 
@@ -24,9 +25,16 @@ load_dotenv(ENV_FILE)
 
 KITE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = KITE_DIR / "config.json"
-BULLISH_FILE = KITE_DIR / "bullish.txt"
-BEARISH_FILE = KITE_DIR / "bearish.txt"
 MARKET_TZ = ZoneInfo("Asia/Kolkata")
+strategy_log = logging.getLogger('kite.strategy')
+if not strategy_log.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s IST [STRATEGY] %(levelname)s %(message)s', '%Y-%m-%d %H:%M:%S')
+    formatter.converter = lambda *_: datetime.now(MARKET_TZ).timetuple()
+    handler.setFormatter(formatter)
+    strategy_log.addHandler(handler)
+strategy_log.setLevel(logging.INFO)
+strategy_log.propagate = False
 
 
 def market_datetime(value):
@@ -350,8 +358,6 @@ class RealtimeScanner:
     def __init__(self, event_callback=None, status_callback=None):
         # Load environment variables
         load_dotenv(ENV_FILE, override=True)
-        self.alert_threshold = float(os.getenv("ALERT_THRESHOLD", "100.0"))
-        print(f"[SYSTEM] Alert threshold set to {self.alert_threshold}%")
         
         self.config = {}
         self.kite = None
@@ -361,8 +367,6 @@ class RealtimeScanner:
         
         self.bullish_conditions = []
         self.bearish_conditions = []
-        self.bullish_mtime = 0
-        self.bearish_mtime = 0
         
         self.last_reload_check = 0
         self.reload_cooldown = 5  # reload config/conditions files every 5s if modified
@@ -398,7 +402,81 @@ class RealtimeScanner:
         self.latest_market_results = {}
         
         self.load_config()
-        self.load_conditions()
+        self.strategy_store = StrategyStore(KITE_DIR)
+        self.active_strategy = self.strategy_store.load('default')
+        self.bullish_conditions = self.active_strategy['bullish']
+        self.bearish_conditions = self.active_strategy['bearish']
+        self.alert_threshold = self.active_strategy['threshold']
+        self._strategy_generation = 0
+        self.strategy_error = None
+        try:
+            selected = self.strategy_store.selected()
+            if selected != 'default':
+                self.activate_strategy(selected, persist=False, source='startup restore')
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            self.strategy_error = str(exc)
+            strategy_log.warning('Saved strategy could not be restored; using %s: %s', self.active_strategy['name'], exc)
+        strategy_log.info('Active: %s [%s] | threshold=%g%% | bullish=%d bearish=%d | version=%s',
+                          self.active_strategy['name'], self.active_strategy['id'], self.alert_threshold,
+                          len(self.bullish_conditions), len(self.bearish_conditions), self.active_strategy['version'])
+
+    def strategy_info(self):
+        profile = self.active_strategy
+        return {key: profile[key] for key in ('id', 'name', 'version', 'threshold', 'cooldown_seconds')}
+
+    def activate_strategy(self, strategy_id, persist=True, source=None):
+        # Consistent lock order: ingestion, evaluation, then pending queue.
+        with self._process_lock, self._evaluation_lock:
+            profile = self.strategy_store.load(strategy_id)
+            previous = self.active_strategy
+            if profile['id'] == previous['id'] and profile['version'] == previous['version']:
+                if persist:
+                    self.strategy_store.save_selection(strategy_id)
+                return self.strategy_info()
+            intervals = set(SUPPORTED_TIMEFRAMES)
+            for condition in profile['bullish'] + profile['bearish']:
+                intervals.add(condition.interval)
+                if condition.rule_type in ('yesterday_compare', 'multi_day_close', 'opening_or_previous_day'):
+                    intervals.add('1d')
+            if '4h' in intervals:
+                intervals.add('1h')
+            intervals.difference_update({'4h', 'tick'})
+            # Prepare privately: a failed history request cannot replace live state.
+            prepared = {}
+            for token, data in self.symbol_data.items():
+                candidate = SymbolData(token, data.symbol)
+                candidate.check_and_add_intervals(self.kite, intervals - data.intervals)
+                if self.kite and any(not rows for rows in candidate.candles.values()):
+                    raise ValueError(f'Could not load required history for {data.symbol}')
+                prepared[token] = candidate
+            if persist:
+                self.strategy_store.save_selection(strategy_id)
+            for token, candidate in prepared.items():
+                data = self.symbol_data[token]
+                with data._lock:
+                    data.intervals.update(candidate.intervals)
+                    data.candles.update(candidate.candles)
+                    data.last_tick_time.update(candidate.last_tick_time)
+            self.active_strategy = profile
+            self._strategy_generation += 1
+            self.bullish_conditions = profile['bullish']
+            self.bearish_conditions = profile['bearish']
+            self.alert_threshold = profile['threshold']
+            with self._evaluation_condition:
+                self._pending_evaluations.clear()
+            self.latest_results.clear()
+            self.confirmed_signals.clear()
+            self._prior_results = {}
+            self._finalized_candles.clear()
+            self._last_evaluation_at.clear()
+            self.strategy_error = None
+            source = source or ('dashboard activation' if persist else 'rule file reload')
+            strategy_log.info('%s: %s [%s] -> %s [%s] | threshold=%g%% | bullish=%d bearish=%d | version=%s',
+                              source, previous['name'], previous['id'], profile['name'], profile['id'],
+                              self.alert_threshold, len(self.bullish_conditions), len(self.bearish_conditions), profile['version'])
+            if self.event_callback:
+                self.event_callback({'type': 'strategy_changed', 'active': self.strategy_info(), 'source': source})
+            return self.strategy_info()
 
     def _set_connection_status(self, status, error=None):
         if status == self.connection_status and (str(error) if error else None) == self.connection_error:
@@ -425,47 +503,23 @@ class RealtimeScanner:
         # Preserve configured order while preventing duplicate subscriptions.
         self.config["symbols"] = list(dict.fromkeys(self.config.get("symbols", [])))
 
-    def load_conditions(self):
-        # Bullish
-        if os.path.exists(BULLISH_FILE):
-            mtime = os.path.getmtime(BULLISH_FILE)
-            if mtime != self.bullish_mtime:
-                self.bullish_mtime = mtime
-                self.bullish_conditions = load_conditions_from_file(BULLISH_FILE)
-                if os.getenv("VERBOSE", "false").lower() == "true":
-                    print(f"[SYSTEM] Loaded {len(self.bullish_conditions)} bullish conditions.")
-        
-        # Bearish
-        if os.path.exists(BEARISH_FILE):
-            mtime = os.path.getmtime(BEARISH_FILE)
-            if mtime != self.bearish_mtime:
-                self.bearish_mtime = mtime
-                self.bearish_conditions = load_conditions_from_file(BEARISH_FILE)
-                if os.getenv("VERBOSE", "false").lower() == "true":
-                    print(f"[SYSTEM] Loaded {len(self.bearish_conditions)} bearish conditions.")
-
     def check_reloads(self):
         now = time.time()
         if now - self.last_reload_check > self.reload_cooldown:
             self.last_reload_check = now
-            
-            # Reload environment variables to check for threshold updates
-            load_dotenv(ENV_FILE, override=True)
-            new_threshold = float(os.getenv("ALERT_THRESHOLD", "100.0"))
-            if new_threshold != self.alert_threshold:
-                if os.getenv("VERBOSE", "false").lower() == "true":
-                    print(f"[SYSTEM] Alert threshold updated from {self.alert_threshold}% to {new_threshold}%")
-                self.alert_threshold = new_threshold
-            
-            self.load_conditions()
-            
-            # Dynamically update requirements for intervals across symbols
-            required_intervals = self.get_required_intervals()
-            for sd in self.symbol_data.values():
-                sd.check_and_add_intervals(self.kite, required_intervals)
+            try:
+                candidate = self.strategy_store.load(self.active_strategy['id'])
+                if candidate['version'] != self.active_strategy['version']:
+                    self.activate_strategy(candidate['id'], persist=False)
+                self.strategy_error = None
+            except (ValueError, OSError, TypeError, KeyError) as exc:
+                if self.strategy_error != str(exc):
+                    strategy_log.warning('Rule reload rejected for %s [%s]; keeping current rules: %s',
+                                         self.active_strategy['name'], self.active_strategy['id'], exc)
+                self.strategy_error = str(exc)
 
     def get_required_intervals(self):
-        intervals = {'3m'}
+        intervals = set(SUPPORTED_TIMEFRAMES)
         for cond in self.bullish_conditions + self.bearish_conditions:
             intervals.add(cond.interval)
             # If the condition references yesterday or daily closes, we require daily '1d' data
@@ -624,7 +678,7 @@ class RealtimeScanner:
             self._pending_evaluations[key] = (
                 snapshot, ltp, vwap, tick_time,
                 tuple(self.bullish_conditions), tuple(self.bearish_conditions),
-                self.alert_threshold)
+                self.alert_threshold, getattr(self, '_strategy_generation', 0))
             self._evaluation_condition.notify()
 
     def _evaluate_snapshot(self, sd, ltp, vwap, tick_time, rules=None):
@@ -637,6 +691,10 @@ class RealtimeScanner:
         bullish, bearish = resolve_direction(bullish, bearish)
         event = live_event(sd, ltp, vwap, bullish, bearish, market_time=tick_time)
         event['threshold'] = threshold
+        if hasattr(self, 'active_strategy'):
+            event['strategy_id'] = self.active_strategy['id']
+            event['strategy_name'] = self.active_strategy['name']
+            event['strategy_version'] = self.active_strategy['version']
         self.latest_results[token] = event
         history = getattr(self, 'history', None)
         if history:
@@ -670,6 +728,11 @@ class RealtimeScanner:
                     f"{result.percentage:.1f}% conditions passed "
                     f"({result.passed}/{result.total}):\n     • {passed_text}"
                 )
+                if hasattr(self, 'active_strategy'):
+                    key = f"{self.active_strategy['id']}:{self.active_strategy['version']}:{key}"
+                    cooldown = self.active_strategy.get('cooldown_seconds')
+                    notifier.cooldown_seconds = cooldown if cooldown is not None else self.config.get('cooldown_seconds', 300)
+                    condition_str = f"[{self.active_strategy['name']}] {condition_str}"
                 sent = notifier.send_alert(sd.symbol, is_bullish=is_bullish,
                                     condition_str=condition_str, price=ltp,
                                     cooldown_key=key)
@@ -688,9 +751,11 @@ class RealtimeScanner:
                 if not self._pending_evaluations:
                     continue
                 key = next(iter(self._pending_evaluations))
-                sd, ltp, vwap, stamp, bull, bear, threshold = self._pending_evaluations.pop(key)
+                sd, ltp, vwap, stamp, bull, bear, threshold, generation = self._pending_evaluations.pop(key)
             try:
                 with self._evaluation_lock:
+                    if generation != getattr(self, '_strategy_generation', 0):
+                        continue
                     self._evaluate_snapshot(sd, ltp, vwap, stamp, (bull, bear, threshold))
             except Exception as exc:
                 self.processing_error = str(exc)

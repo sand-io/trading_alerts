@@ -116,3 +116,21 @@ testSearchSelection().catch(error=>{console.error(error);process.exitCode=1});
 vm.runInContext("reviewMode=true;reviewEvents=[{candle:{time:1},market_time:'2026-10-08T10:00:00+05:30',instrument_token:1,price:100,vwap:99,threshold:70,bullish:{passed:1,total:1,percentage:100,rules:[]},bearish:{passed:0,total:1,percentage:0,rules:[]}}];currentTimeframe='5m'",context);
 chartMocks[0].clickCallback({time:1});
 assert.ok(nodes.get('strategyContext').textContent.includes('Saved live evaluation'));
+
+// No strategy HTTP polling: sync only on a change, with duplicate events combined.
+assert.ok(!/setInterval\([^\n]*api\/strategies/.test(html));
+assert.ok(html.includes("data.type==='strategy_changed'"));
+async function testStrategySync(){
+ let calls=0,release;
+ const syncContext=vm.createContext({Promise,activeStrategyId:'default',activeStrategyVersion:'v1',currentToken:null,
+   loadStrategies:async()=>{calls++;await new Promise(resolve=>{release=resolve});syncContext.activeStrategyId='trend';syncContext.activeStrategyVersion='v2'},
+   loadSnapshot:async()=>{throw new Error('No symbol selected')}});
+ vm.runInContext(html.slice(html.indexOf('let strategyRefresh='),html.indexOf("document.getElementById('activateStrategy').onclick")),syncContext);
+ await vm.runInContext("refreshStrategyState({id:'default',version:'v1'})",syncContext);
+ assert.equal(calls,0);
+ const pending=vm.runInContext("refreshStrategyState({id:'trend',version:'v2'})",syncContext);
+ for(let i=0;i<20;i++)vm.runInContext("refreshStrategyState({id:'trend',version:'v2'})",syncContext);
+ assert.equal(calls,1);release();await pending;assert.equal(calls,1);
+ await vm.runInContext("refreshStrategyState({id:'trend',version:'v2'})",syncContext);assert.equal(calls,1);
+}
+testStrategySync().catch(error=>{console.error(error);process.exitCode=1});

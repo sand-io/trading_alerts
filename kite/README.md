@@ -12,7 +12,7 @@ Here is how the data flows through the application in real-time:
 graph TD
     A[Kite Connect API] -->|1. Auth & Token Resolution| B(RealtimeScanner)
     C[.env & config.json] -->|2. Load Config & Threshold| B
-    D[bullish.txt & bearish.txt] -->|3. Load & Parse Rules| B
+    D[strategies/default.json] -->|3. Load & Parse Rules| B
     
     B -->|4. Subscribe WebSocket| E[KiteTicker WS Feed]
     E -->|5. Realtime Ticks| F[SymbolData / Candle Compiler]
@@ -38,15 +38,15 @@ graph TD
    * `4h` candles are resampled on-the-fly using `1h` candles.
 5. **Grouped Condition Evaluation:** 
    * Every incoming tick updates candle OHLC and volume on the ingestion worker. Live chart events are published at most once per second per symbol (and immediately at candle rollover).
-   * A separate worker evaluates private candle snapshots from `bullish.txt` and `bearish.txt`. Provisional evaluations for the same symbol/candle are combined; final snapshots from earlier candles are retained. The rule panel displays the evaluation timestamp separately from the latest market update.
+   * A separate worker evaluates private candle snapshots from the active strategy JSON. Provisional evaluations for the same symbol/candle are combined; final snapshots from earlier candles are retained. The rule panel displays the evaluation timestamp separately from the latest market update.
    * Desktop alerts are suppressed for evaluations more than ten seconds behind exchange time. The health endpoint reports pending tick batches and evaluations for monitoring processing load.
    * It counts the percentage of rules that evaluate to `True`.
 6. **Threshold-Based Alerts:** 
-   * The scanner loads `ALERT_THRESHOLD` (e.g. `70` for 70%) from the `.env` file.
-   * If the percentage of passing conditions $\ge$ `ALERT_THRESHOLD`, it triggers a grouped alert.
+   * The scanner loads `threshold` (e.g. `70` for 70%) from the active strategy JSON.
+   * If the percentage of passing conditions $\ge$ `threshold`, it triggers a grouped alert.
    * The alert lists exactly which conditions passed and the stock's current price.
 7. **Cooldown Filter:** The notifier applies a cooldown (e.g., 5 minutes) using a stable `cooldown_key` so that flickering condition counts do not cause alert spam. Desktop notifications use Notification Center on macOS, Windows notifications on Windows, and `notify-send`/libnotify on Linux; terminal output remains available when desktop notifications are unavailable.
-8. **Dynamic Configuration Reload:** Every 5 seconds, the scanner checks the modification timestamps of `bullish.txt`, `bearish.txt`, and `.env`. If files have changed, it reloads the conditions and `ALERT_THRESHOLD` on-the-fly without interrupting the live WebSocket connection.
+8. **Dynamic Configuration Reload:** Every 5 seconds, the scanner checks the modification timestamps of the active strategy JSON. If files have changed, it reloads the conditions and its threshold on-the-fly without interrupting the live WebSocket connection.
 
 ---
 
@@ -60,7 +60,7 @@ graph TD
 * **`config.json`**: List of symbols to track.
 * **`nifty200_futures_underlyings.json`**: The 200 PDF reference underlyings.
 * **`update_futures_symbols.py`**: Resolves those underlyings against Zerodha's live NFO instrument master and replaces `config.json` with exact near-month futures contracts. Run it after each monthly rollover.
-* **`bullish.txt` / `bearish.txt`**: Plaintext files containing conditions to trigger alerts.
+* **`strategies/default.json`**: Multi-Timeframe Trend Confluence rules and alert threshold.
 
 ---
 
@@ -95,7 +95,6 @@ Configure the shared `trading_alerts/.env` file with the following variables:
 KITE_API_KEY="your_api_key"
 KITE_API_SECRET="your_api_secret"
 KITE_ACCESS_TOKEN="your_access_token_after_auth"
-ALERT_THRESHOLD=70
 ```
 
 ### 2. `config.json`
@@ -251,3 +250,73 @@ time while the scanner was stopped are not fabricated. Historical rule snapshots
 are not rewritten when rule files change. Review is a record of live behavior,
 not a historical backtest, trade execution log, or P&L calculation. Normal startup
 still uses Kite authentication and symbol resolution.
+
+### Multiple saved strategies
+
+The **Strategy** selector and **Activate** button switch the scanner across all
+symbols without reconnecting Kite. **Multi-Timeframe Trend Confluence** uses
+`kite/strategies/default.json`, preserving all 14 bullish and 14 bearish rules
+and the 90% threshold that was configured at migration. The scanner reads every
+strategy from JSON. The old text files have been removed; `.env`
+`ALERT_THRESHOLD` no longer controls strategy thresholds. Edit the JSON instead. Selection is remembered in
+`kite/data/active_strategy.json`. Restart the application after this upgrade.
+
+A second profile, **EMA trend (example)**, demonstrates the format; it is an
+example rule set, not a recommendation. Add profiles as `kite/strategies/<id>.json`
+using letters, numbers, underscores or hyphens for the ID:
+
+```json
+{
+  "name": "My strategy",
+  "threshold": 100,
+  "cooldown_seconds": 300,
+  "bullish": ["5-minute Close is above 5-minute EMA (20)"],
+  "bearish": ["5-minute Close is below 5-minute EMA (20)"]
+}
+```
+
+Profiles use the existing condition language. Both rule lists must contain strings;
+one side may be empty. Invalid rules or thresholds reject activation. If required
+history cannot be loaded, the existing strategy remains active. Preparation pauses
+evaluation while preserving the feed connection. Cooldowns default to `config.json`
+when omitted and are isolated by strategy and rule version. Files are checked every
+five seconds on incoming ticks; invalid edits retain the last working rules.
+
+This version runs one strategy across all symbols. Chart studies remain the existing
+standard studies, and confirmed markers still use 5-minute candle rollover. Other
+confirmation intervals, custom Python evaluators and a visual rule editor are not
+part of this version. All dashboard chart timeframes remain collected regardless
+of the profile's rule intervals.
+
+Evaluations and alerts carry the strategy name, ID and version. Existing database
+records are migrated to `default`; the original records remain intact. Saved-day
+review filters by the active strategy. Activate another profile to review its
+observations. Changing rules does not rewrite saved snapshots. The history API
+also accepts `strategy_id`; omitting it returns all strategies for compatibility.
+
+Run strategy and existing regression checks from `kite`:
+
+```bash
+../.venv/bin/python -m unittest discover -p 'test_*.py'
+node test_dashboard_ui.js
+```
+
+
+### BTST profile
+
+`strategies/btst_setup.json` adds **BTST Daily-Hourly Confluence**, matching the
+seven buy conditions in the supplied PDF, plus the user-requested bearish
+mirror. Each side requires all seven rules (100% threshold). MACD uses user-confirmed 12/26/9 periods. See
+[the BTST condition mapping](STRATEGY_AND_CONDITIONS.md#btst-daily-hourly-confluence)
+for exact boundaries and candle timing. Restart after the parser upgrade, then
+select and activate this profile. It is added without changing the saved active
+strategy selection.
+
+
+Strategy state is synchronized through the existing dashboard WebSocket; there is
+no recurring `/api/strategies` HTTP polling. Page load and actual strategy changes
+refresh the strategy list, and WebSocket reconnect checks for missed changes.
+Refresh the page to discover newly added inactive profiles. Terminal `[STRATEGY]`
+logs include startup state, activation/reload source, previous and new strategy,
+threshold, rule counts and version. Invalid edits retain working rules and log
+one warning per distinct error rather than repeating the warning every five seconds.

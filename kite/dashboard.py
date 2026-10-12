@@ -10,13 +10,13 @@ import os
 import threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse
 
-from scanner import RealtimeScanner
+from scanner import RealtimeScanner, strategy_log
 from strategy_runtime import SUPPORTED_TIMEFRAMES, chart_snapshot, live_study_values, historical_evaluation
 
 
@@ -74,6 +74,9 @@ class LiveBridge:
         self.loop = None
 
     def publish_from_scanner(self, event: dict) -> None:
+        if event.get('type') == 'strategy_changed':
+            self._schedule(self.broadcast(event))
+            return
         with self._subscription_lock:
             if not self._subscription_counts.get(event["symbol"], 0):
                 return
@@ -112,9 +115,12 @@ class LiveBridge:
         dead = []
         study_cache = {}
         for socket, subscription in targets:
-            if subscription["symbol"] != event["symbol"]:
+            if event.get("type") != "strategy_changed" and subscription["symbol"] != event["symbol"]:
                 continue
             try:
+                if event.get('type') == 'strategy_changed':
+                    await socket.send_json(event)
+                    continue
                 timeframe = subscription["timeframe"]
                 if event.get('type') != 'candle_update' and timeframe not in study_cache:
                     symbol_data = scanner.symbol_data.get(event["instrument_token"])
@@ -222,6 +228,21 @@ async def health():
     }
 
 
+@app.get('/api/strategies')
+def strategies():
+    return {'profiles': scanner.strategy_store.profiles(), 'active': scanner.strategy_info(),
+            'error': scanner.strategy_error}
+
+
+@app.post('/api/strategies/{strategy_id}/activate')
+def activate_strategy(strategy_id: str):
+    try:
+        return scanner.activate_strategy(strategy_id)
+    except (ValueError, OSError, TypeError, KeyError) as exc:
+        strategy_log.warning('Activation rejected for [%s]; active strategy unchanged: %s', strategy_id, exc)
+        raise HTTPException(400, str(exc))
+
+
 @app.get("/api/symbols")
 async def symbols():
     return [{"token": token, "symbol": symbol}
@@ -230,28 +251,33 @@ async def symbols():
 
 @app.get("/api/snapshot/{instrument_token}")
 def snapshot(instrument_token: int, timeframe: str = "5m"):
-    symbol_data = scanner.symbol_data.get(instrument_token)
-    if not symbol_data:
-        raise HTTPException(404, "Symbol is not subscribed or scanner is still starting")
-    if timeframe not in SUPPORTED_TIMEFRAMES:
-        raise HTTPException(400, f"Timeframe must be one of: {', '.join(SUPPORTED_TIMEFRAMES)}")
-    payload = chart_snapshot(symbol_data, timeframe=timeframe)
-    strategy = scanner.latest_results.get(instrument_token)
-    if strategy is None:
-        with symbol_data._lock:
-            strategy = historical_evaluation(symbol_data, scanner.bullish_conditions,
-                                             scanner.bearish_conditions, scanner.alert_threshold)
-    payload.update({
-        "symbol": symbol_data.symbol,
-        "instrument_token": instrument_token,
-        "strategy": strategy,
-        "market": getattr(scanner, 'latest_market_results', {}).get(instrument_token),
-        "signals": scanner.history.events(instrument_token,
-            datetime.now(ZoneInfo('Asia/Kolkata')).date().isoformat(),
-            'confirmed'),
-        "threshold": scanner.alert_threshold,
-    })
-    return payload
+    with getattr(scanner, '_process_lock', nullcontext()), getattr(scanner, '_evaluation_lock', nullcontext()):
+        symbol_data = scanner.symbol_data.get(instrument_token)
+        if not symbol_data:
+            raise HTTPException(404, "Symbol is not subscribed or scanner is still starting")
+        if timeframe not in SUPPORTED_TIMEFRAMES:
+            raise HTTPException(400, f"Timeframe must be one of: {', '.join(SUPPORTED_TIMEFRAMES)}")
+        payload = chart_snapshot(symbol_data, timeframe=timeframe)
+        strategy = scanner.latest_results.get(instrument_token)
+        if strategy is None:
+            with symbol_data._lock:
+                strategy = historical_evaluation(symbol_data, scanner.bullish_conditions,
+                                                 scanner.bearish_conditions, scanner.alert_threshold)
+        if strategy is not None and hasattr(scanner, 'active_strategy'):
+            strategy = {**strategy, 'strategy_id': scanner.active_strategy['id'],
+                        'strategy_name': scanner.active_strategy['name'],
+                        'strategy_version': scanner.active_strategy['version']}
+        payload.update({
+            "symbol": symbol_data.symbol,
+            "instrument_token": instrument_token,
+            "strategy": strategy,
+            "market": getattr(scanner, 'latest_market_results', {}).get(instrument_token),
+            "signals": scanner.history.events(instrument_token,
+                datetime.now(ZoneInfo('Asia/Kolkata')).date().isoformat(),
+                'confirmed', getattr(scanner, 'active_strategy', {}).get('id', 'default')),
+            "threshold": scanner.alert_threshold,
+        })
+        return payload
 
 
 @app.get("/api/history/{instrument_token}/dates")
@@ -260,7 +286,7 @@ def history_dates(instrument_token: int):
 
 
 @app.get("/api/history/{instrument_token}/{day}")
-def history_day(instrument_token: int, day: str, timeframe: str = "5m"):
+def history_day(instrument_token: int, day: str, timeframe: str = "5m", strategy_id: str | None = None):
     try:
         datetime.strptime(day, "%Y-%m-%d")
     except ValueError:
@@ -270,12 +296,12 @@ def history_day(instrument_token: int, day: str, timeframe: str = "5m"):
     chart = scanner.history.chart(instrument_token, day, timeframe)
     if chart is None:
         raise HTTPException(404, "No recorded chart for this date")
-    evaluations = scanner.history.events(instrument_token, day, 'evaluation')
+    evaluations = scanner.history.events(instrument_token, day, 'evaluation', strategy_id)
     return {**chart, "instrument_token": instrument_token, "day": day,
             "strategy": evaluations[-1] if evaluations else None,
             "threshold": evaluations[-1].get('threshold') if evaluations else None,
-            "signals": scanner.history.events(instrument_token, day, 'confirmed'),
-            "alerts": scanner.history.events(instrument_token, day, 'alert'),
+            "signals": scanner.history.events(instrument_token, day, 'confirmed', strategy_id),
+            "alerts": scanner.history.events(instrument_token, day, 'alert', strategy_id),
             "evaluations": evaluations}
 
 
@@ -291,6 +317,7 @@ async def live_updates(websocket: WebSocket, instrument_token: int):
         bridge.clients[websocket] = {"symbol": symbol, "timeframe": "5m"}
     bridge.add_subscription(symbol)
     try:
+        await websocket.send_json({'type': 'strategy_changed', 'active': scanner.strategy_info(), 'source': 'connection sync'})
         while True:
             # Receive client heartbeats; market events are pushed by the bridge.
             message = await websocket.receive_text()

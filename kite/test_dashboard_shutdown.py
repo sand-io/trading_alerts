@@ -242,6 +242,24 @@ class TestDashboardShutdown(unittest.IsolatedAsyncioTestCase):
         bridge._schedule(coroutine)
         self.assertIsNone(coroutine.cr_frame)  # rejected coroutine is closed, not leaked
 
+    async def test_strategy_change_broadcasts_to_all_symbols_without_studies(self):
+        from unittest.mock import AsyncMock
+        bridge = dashboard.LiveBridge()
+        first, second = Mock(), Mock()
+        first.send_json = AsyncMock()
+        second.send_json = AsyncMock()
+        bridge.clients = {first: {'symbol': 'NSE:ONE', 'timeframe': '5m'},
+                          second: {'symbol': 'NSE:TWO', 'timeframe': '1h'}}
+        event = {'type': 'strategy_changed', 'active': {'id': 'trend', 'version': 'v2'}}
+        with patch.object(dashboard, 'live_study_values') as studies:
+            await bridge.broadcast(event)
+            studies.assert_not_called()
+        first.send_json.assert_awaited_once_with(event)
+        second.send_json.assert_awaited_once_with(event)
+        with patch.object(bridge, '_schedule', side_effect=lambda coroutine: coroutine.close()) as schedule:
+            bridge.publish_from_scanner(event)
+            schedule.assert_called_once()
+
     async def test_lifespan_stops_scanner_and_finalizer(self):
         closed = threading.Event()
         closed.set()

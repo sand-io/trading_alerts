@@ -1,6 +1,8 @@
 import unittest
 import pandas as pd
-from conditions import Condition, load_conditions_from_file
+from conditions import Condition
+from pathlib import Path
+from strategies import StrategyStore
 
 class MockSymbolData:
     def __init__(self, df_candles, df_daily=None):
@@ -98,7 +100,8 @@ class TestConditionParser(unittest.TestCase):
             ('close_ema', '1d', {'ema_period': 9, 'op': '>'}),
             ('rsi', '1d', {'value': 55.0, 'op': '>'}),
         ]
-        bullish = load_conditions_from_file('bullish.txt')
+        profile = StrategyStore(Path(__file__).resolve().parent).load('default')
+        bullish = profile['bullish']
         self.assertEqual(len(bullish), len(expected_bullish))
         for condition, (rule_type, interval, params) in zip(bullish, expected_bullish):
             self.assertEqual(condition.rule_type, rule_type)
@@ -106,7 +109,7 @@ class TestConditionParser(unittest.TestCase):
             for key, value in params.items():
                 self.assertEqual(condition.params[key], value)
 
-        bearish = load_conditions_from_file('bearish.txt')
+        bearish = profile['bearish']
         self.assertEqual(len(bearish), 14)
         self.assertEqual(bearish[1].rule_type, 'opening_or_previous_day')
         self.assertEqual(bearish[1].params['op'], '<')

@@ -2,7 +2,9 @@
 
 ## 1. Live multi-timeframe strategy
 
-Used by the Kite scanner and dashboard.
+Named **Multi-Timeframe Trend Confluence**, stored in `strategies/default.json`
+with internal ID `default`. The scanner validates each rule using `Condition.parse`
+in `conditions.py`. The original text files have been removed.
 
 ### Bullish conditions
 
@@ -44,10 +46,11 @@ Each side is scored independently:
 
 ```text
 Passing percentage = passed conditions / 14 × 100
-Alert when passing percentage >= 30%
+Alert when passing percentage >= 90%
 ```
 
-The current threshold requires at least 5 of 14 conditions, not all 14.
+The migrated 90% threshold requires at least 13 of 14 conditions.
+The active JSON profile controls the threshold.
 If both sides reach the threshold on the same evaluation, only the side with
 the higher passing percentage becomes the directional signal. An exact tie is
 treated as ambiguous and produces no directional signal. Both raw scores remain
@@ -125,3 +128,60 @@ Minimum peak distance = max(10, N // 20)
 - Latest Close is below support.
 
 **Rectangle limitation:** the current calculations include the latest candle in the range. For valid OHLC data, these strict breakout conditions cannot normally pass.
+
+
+## BTST Daily-Hourly Confluence
+
+Profile: `strategies/btst_setup.json`. Source: the supplied `BTST SETUP.pdf`.
+The PDF supplies the bullish setup. A user-requested bearish mirror is included
+in the same profile. `threshold: 100` requires all seven rules on each side.
+
+| PDF condition | Implementation |
+| --- | --- |
+| Daily trend | Daily close strictly above daily EMA(10) |
+| Daily momentum | RSI(14) in [40,45), or RSI(14) >= 60 |
+| Hourly trend | Hourly close strictly above hourly EMA(10) |
+| Hourly momentum | MACD line strictly above signal line |
+| Hourly volume trend | OBV strictly above EMA(11) of OBV |
+| Hourly volume spike | Current volume strictly exceeds each of the previous three hourly volumes |
+| Hourly price confirmation | Close strictly above Open |
+
+The RSI condition uses the explicit formula supplied in the PDF's developer note.
+It does not require a fresh RSI crossover. The RSI alternatives remain one rule.
+The previous three volumes exclude the trigger candle; this is not an average-volume
+comparison. Equality fails strict comparisons. MACD and OBV may already be above
+their reference lines, as allowed by the PDF; fresh crossovers are not mandatory.
+
+The PDF does not specify MACD periods. The user confirmed fast 12, slow 26,
+signal 9. No extra rule for time of day, entries, exits or stops has been added. The name BTST alone does not add an end-of-day restriction.
+
+Live evaluation uses the current/forming daily and hourly candles, including the
+current hourly volume, as permitted by the PDF. These states can change before
+close. The existing dashboard's confirmed markers still record at five-minute
+rollover; they do not certify that the hourly candle has closed. Existing standard
+chart studies are unchanged (for example, an EMA20/50 overlay is not this profile's
+EMA10 rule). The sidebar rule results are the BTST evaluation.
+
+Parser additions: compound RSI bands (`rsi_bands`), volume above every prior candle
+(`volume_previous_max`), and Close versus Open (`close_open`). Existing rule
+patterns and strategy files retain their behavior. Restart the app after this
+parser upgrade, then select **BTST Daily-Hourly Confluence** and activate it.
+
+
+### User-requested bearish mirror
+
+The PDF has no bearish setup; these rules are the user's requested directional
+mirror. Bullish rules remain unchanged.
+
+- Daily close strictly below daily EMA(10).
+- Daily RSI(14): **55 < RSI <= 60 OR RSI <= 40**. This is the exact reflection
+  of the bullish formula under `bearish RSI = 100 - bullish RSI`, preserving
+  strict and inclusive boundaries.
+- Hourly close strictly below hourly EMA(10).
+- Hourly MACD(12,26,9) strictly below its signal line; held below is sufficient.
+- Hourly OBV strictly below its EMA(11); held below is sufficient.
+- Hourly volume strictly above each of the previous three hourly volumes.
+  Volume is a direction-neutral confirmation and stays elevated on both sides.
+- Hourly Close strictly below Open (a red candle; doji fails).
+
+The compound bearish RSI pattern is implemented as `rsi_bearish_bands`.

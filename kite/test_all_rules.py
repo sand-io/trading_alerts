@@ -1,10 +1,11 @@
-import os
+import json
+from pathlib import Path
 import sys
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 
-from conditions import Condition, load_conditions_from_file
+from conditions import Condition
 
 class MockSymbolData:
     def __init__(self, df_5m, df_15m, df_1h, df_1d):
@@ -55,23 +56,14 @@ def test_rules():
     symbol_data = MockSymbolData(df_5m, df_15m, df_1h, df_1d)
     
     # Let's check parse & evaluation
-    files = {
-        "Bullish": "bullish.txt",
-        "Bearish": "bearish.txt"
-    }
-    
+    profile_path = Path(__file__).resolve().parent / 'strategies' / 'default.json'
+    profile = json.loads(profile_path.read_text())
     has_errors = False
-    
-    for category, file_path in files.items():
-        print(f"\n--- Testing {category} Rules from '{file_path}' ---")
-        if not os.path.exists(file_path):
-            print(f"[ERROR] File '{file_path}' not found!")
-            has_errors = True
-            continue
-            
-        with open(file_path, "r") as f:
-            lines = [l.strip() for l in f if l.strip() and not l.strip().startswith(("#", "//"))]
-            
+
+    for side in ('bullish', 'bearish'):
+        print(f"\n--- Testing {side} rules from '{profile_path}' ---")
+        lines = profile[side]
+
         for i, raw_text in enumerate(lines, 1):
             print(f"Rule #{i}: \"{raw_text}\"")
             

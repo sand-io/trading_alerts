@@ -18,14 +18,18 @@ class HistoryStore:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY, token INTEGER, day TEXT, kind TEXT,
-                    candle INTEGER, payload TEXT);
+                    candle INTEGER, payload TEXT, strategy TEXT NOT NULL DEFAULT 'default');
                 CREATE INDEX IF NOT EXISTS events_lookup ON events(token,day,kind);
-                CREATE UNIQUE INDEX IF NOT EXISTS confirmed_once
-                    ON events(token,candle) WHERE kind='confirmed';
+
                 CREATE TABLE IF NOT EXISTS charts (
                     token INTEGER, day TEXT, timeframe TEXT, payload TEXT,
                     PRIMARY KEY(token,day,timeframe));
             ''')
+            columns = {row[1] for row in db.execute('PRAGMA table_info(events)')}
+            if 'strategy' not in columns:
+                db.execute("ALTER TABLE events ADD COLUMN strategy TEXT NOT NULL DEFAULT 'default'")
+            db.execute('DROP INDEX IF EXISTS confirmed_once')
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS confirmed_strategy_once ON events(token,candle,strategy) WHERE kind='confirmed'")
 
     @contextmanager
     def connect(self):
@@ -43,8 +47,8 @@ class HistoryStore:
         day = datetime.fromtimestamp(candle['time'], TZ).date().isoformat()
         payload = {k: v for k, v in event.items() if k != 'confirmed_signal'}
         with self.connect() as db:
-            db.execute('INSERT OR IGNORE INTO events(token,day,kind,candle,payload) VALUES(?,?,?,?,?)',
-                       (event['instrument_token'], day, kind, candle['time'], json.dumps(payload)))
+            db.execute('INSERT OR IGNORE INTO events(token,day,kind,candle,payload,strategy) VALUES(?,?,?,?,?,?)',
+                       (event['instrument_token'], day, kind, candle['time'], json.dumps(payload), event.get('strategy_id', 'default')))
 
     def save_charts(self, token, day, charts):
         with self.connect() as db:
@@ -56,11 +60,14 @@ class HistoryStore:
             return [r[0] for r in db.execute(
                 'SELECT DISTINCT day FROM events WHERE token=? ORDER BY day DESC', (token,))]
 
-    def events(self, token, day, kind):
+    def events(self, token, day, kind, strategy_id=None):
         with self.connect() as db:
-            return [json.loads(r[0]) for r in db.execute(
-                'SELECT payload FROM events WHERE token=? AND day=? AND kind=? ORDER BY candle,id',
-                (token, day, kind))]
+            query = 'SELECT payload FROM events WHERE token=? AND day=? AND kind=?'
+            args = [token, day, kind]
+            if strategy_id is not None:
+                query += ' AND strategy=?'
+                args.append(strategy_id)
+            return [json.loads(r[0]) for r in db.execute(query + ' ORDER BY candle,id', args)]
 
     def chart(self, token, day, timeframe):
         with self.connect() as db:
