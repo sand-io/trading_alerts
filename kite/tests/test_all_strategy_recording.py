@@ -137,7 +137,7 @@ class AllStrategyRecordingTests(unittest.TestCase):
         self.assertIn('third', self.scanner.recording_profiles)
 
     def test_btst_archive_contains_its_actual_indicator_parameters(self):
-        profile = StrategyStore(Path(__file__).resolve().parent).load('btst_setup')
+        profile = StrategyStore(Path(__file__).resolve().parents[1]).load('btst_setup')
         hourly = profile_chart_snapshot(self.data, '1h', profile)
         self.assertEqual([overlay['period'] for overlay in hourly['overlays']], [10])
         self.assertEqual({study['id'] for study in hourly['studies']}, {'macd12_26_9', 'obv11', 'volume3'})

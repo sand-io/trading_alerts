@@ -25,7 +25,7 @@ class Data:
 
 class BTSTTests(unittest.TestCase):
     def setUp(self):
-        self.profile = StrategyStore(Path(__file__).resolve().parent).load('btst_setup')
+        self.profile = StrategyStore(Path(__file__).resolve().parents[1]).load('btst_setup')
         self.rules = self.profile['bullish']
         self.data = Data()
 

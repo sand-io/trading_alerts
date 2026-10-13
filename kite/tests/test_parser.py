@@ -100,7 +100,7 @@ class TestConditionParser(unittest.TestCase):
             ('close_ema', '1d', {'ema_period': 9, 'op': '>'}),
             ('rsi', '1d', {'value': 55.0, 'op': '>'}),
         ]
-        profile = StrategyStore(Path(__file__).resolve().parent).load('default')
+        profile = StrategyStore(Path(__file__).resolve().parents[1]).load('default')
         bullish = profile['bullish']
         self.assertEqual(len(bullish), len(expected_bullish))
         for condition, (rule_type, interval, params) in zip(bullish, expected_bullish):

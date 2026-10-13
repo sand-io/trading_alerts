@@ -207,11 +207,6 @@ async def dashboard_page():
     return FileResponse(KITE_DIR / "dashboard.html", media_type="text/html")
 
 
-@app.get('/strategy-indicator.js')
-def strategy_indicator_script():
-    return FileResponse(KITE_DIR / 'strategy_indicator.js', media_type='text/javascript')
-
-
 @app.get("/api/health")
 async def health():
     status = "error" if scanner_state["error"] else scanner.connection_status

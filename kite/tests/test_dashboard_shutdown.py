@@ -155,7 +155,7 @@ dashboard.chart_snapshot = snapshot
 uvicorn.run(dashboard.app, host='127.0.0.1', port=0, log_level='info')
 '''
         process = subprocess.Popen([sys.executable, '-u', '-c', script],
-                                   cwd=os.path.dirname(__file__), stdout=subprocess.PIPE,
+                                   cwd=os.path.dirname(os.path.dirname(__file__)), stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, text=True)
         logs = []
         sockets = []

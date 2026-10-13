@@ -2,6 +2,7 @@ import json
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 from strategies import StrategyStore
@@ -90,7 +91,7 @@ class StrategyTests(unittest.TestCase):
     def test_history_migration_and_strategy_confirmation_isolation(self):
         import sqlite3
         path = self.root / 'old.sqlite3'
-        with sqlite3.connect(path) as db:
+        with closing(sqlite3.connect(path)) as db, db:
             db.execute('CREATE TABLE events(id INTEGER PRIMARY KEY, token INTEGER, day TEXT, kind TEXT, candle INTEGER, payload TEXT)')
             db.execute("CREATE UNIQUE INDEX confirmed_once ON events(token,candle) WHERE kind='confirmed'")
         store = HistoryStore(path)
@@ -132,7 +133,7 @@ class StrategyTests(unittest.TestCase):
 
     def test_default_json_preserves_every_original_parsed_rule(self):
         import hashlib
-        root = Path(__file__).resolve().parent
+        root = Path(__file__).resolve().parents[1]
         profile = StrategyStore(root).load('default')
         self.assertEqual(profile['threshold'], 90)
         for side in ('bullish', 'bearish'):
