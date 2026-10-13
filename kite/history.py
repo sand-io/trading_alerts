@@ -31,9 +31,12 @@ class HistoryStore:
             columns = {row[1] for row in db.execute('PRAGMA table_info(events)')}
             if 'strategy' not in columns:
                 db.execute("ALTER TABLE events ADD COLUMN strategy TEXT NOT NULL DEFAULT 'default'")
+            if 'confirmation_timeframe' not in columns:
+                db.execute("ALTER TABLE events ADD COLUMN confirmation_timeframe TEXT NOT NULL DEFAULT '5m'")
             db.execute('CREATE INDEX IF NOT EXISTS events_strategy_lookup ON events(token,day,strategy,kind)')
             db.execute('DROP INDEX IF EXISTS confirmed_once')
-            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS confirmed_strategy_once ON events(token,candle,strategy) WHERE kind='confirmed'")
+            db.execute('DROP INDEX IF EXISTS confirmed_strategy_once')
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS confirmed_timeframe_once ON events(token,candle,strategy,confirmation_timeframe) WHERE kind='confirmed'")
 
     @contextmanager
     def connect(self):
@@ -51,8 +54,8 @@ class HistoryStore:
         day = datetime.fromtimestamp(candle['time'], TZ).date().isoformat()
         payload = {k: v for k, v in event.items() if k != 'confirmed_signal'}
         with self.connect() as db:
-            db.execute('INSERT OR IGNORE INTO events(token,day,kind,candle,payload,strategy) VALUES(?,?,?,?,?,?)',
-                       (event['instrument_token'], day, kind, candle['time'], json.dumps(payload), event.get('strategy_id', 'default')))
+            db.execute('INSERT OR IGNORE INTO events(token,day,kind,candle,payload,strategy,confirmation_timeframe) VALUES(?,?,?,?,?,?,?)',
+                       (event['instrument_token'], day, kind, candle['time'], json.dumps(payload), event.get('strategy_id', 'default'), event.get('confirmation_timeframe', '5m')))
 
     def save_charts(self, token, day, charts):
         with self.connect() as db:
@@ -71,7 +74,7 @@ class HistoryStore:
             if strategy_id is not None:
                 query += ' AND strategy=?'
                 args.append(strategy_id)
-            return [json.loads(r[0]) for r in db.execute(query + ' ORDER BY candle,id', args)]
+            return [json.loads(r[0]) for r in db.execute(query + ' ORDER BY id', args)]
 
     def chart(self, token, day, timeframe):
         with self.connect() as db:
@@ -97,9 +100,12 @@ class HistoryStore:
             for strategy_id, payload in rows:
                 event = json.loads(payload)
                 entry = result.setdefault(strategy_id, {'id': strategy_id, 'name': event.get('strategy_name', strategy_id),
-                                                        'evaluations': 0, 'versions': []})
+                                                        'evaluations': 0, 'versions': [], 'confirmation_timeframes': []})
                 entry['name'] = event.get('strategy_name', entry['name'])
                 entry['evaluations'] += 1
+                timeframe = event.get('confirmation_timeframe', '5m')
+                if timeframe not in entry['confirmation_timeframes']:
+                    entry['confirmation_timeframes'].append(timeframe)
                 version = event.get('strategy_version')
                 if version and version not in entry['versions']:
                     entry['versions'].append(version)

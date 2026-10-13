@@ -56,10 +56,9 @@ graph TD
 * **`conditions.py`**: Contains indicators utilizing `ta-lib` (e.g., MACD, RSI, ADX, Heikin-Ashi) and contains the natural-language condition parsers.
 * **`notifier.py`**: Handles alert throttling (cooldowns) and triggers terminal printouts and macOS desktop notifications.
 * **`../kite_runtime/auth.py`**: Shared Kite Connect authentication used by both Kite applications.
-* **`test_parser.py`**: Unit tests verifying rule parsing and logic evaluation.
+* **`tests/`**: Python regression tests and the Node dashboard test; run commands below from the repository root.
 * **`config.json`**: List of symbols to track.
-* **`nifty200_futures_underlyings.json`**: The 200 PDF reference underlyings.
-* **`update_futures_symbols.py`**: Resolves those underlyings against Zerodha's live NFO instrument master and replaces `config.json` with exact near-month futures contracts. Run it after each monthly rollover.
+* **`update_futures_symbols.py`**: Requires a user-supplied `nifty200_futures_underlyings.json` list (not bundled); resolves those underlyings against Zerodha's live NFO instrument master and replaces `config.json` with exact near-month futures contracts. Run it after each monthly rollover.
 * **`strategies/default.json`**: Multi-Timeframe Trend Confluence rules and alert threshold.
 
 ---
@@ -163,8 +162,8 @@ Stop with one Ctrl+C. Shutdown drains active requests, stops Kite reconnects,
 closes the ticker on its reactor thread and cancels the session finalizer and
 pending dashboard broadcasts. Ticker/startup-thread cleanup waits are bounded.
 The split dashboard does not rebuild unused historical combined-score plots.
-Run shutdown regression checks from `kite` with
-`../.venv/bin/python -m unittest test_dashboard_shutdown.py test_live_dashboard.py`.
+Run shutdown regression checks from the repository root with
+`.venv/bin/python -m unittest kite.tests.test_dashboard_shutdown kite.tests.test_live_dashboard`.
 
 Kite supplies exact live VWAP through `average_price`. Its historical candle API
 does not include VWAP, so pre-connection chart history uses a conventional
@@ -186,20 +185,24 @@ python scanner.py
 ```
 
 ### 3. Running Unit Tests
-To verify parsing and indicator evaluations:
+From the repository root, verify parsing and indicator evaluations:
 ```bash
-python test_parser.py
+.venv/bin/python -m unittest kite.tests.test_parser
 ```
 # Chart timestamp contract
 
 The dashboard uses two synchronized charts: candles and price overlays above,
 and strategy component studies below. Select ADX (14), OBV with EMA (5), or
-Range / 5×ATR on 5m; MACD on 15m; RSI on 1h/1D. The lower chart uses its own
+Range / 5×ATR on 3m/5m; MACD on 15m; RSI on 1h/4h/1D.
+Profile-specific studies take priority. When no profile study applies on 3m or
+4h, these default chart studies remain available without adding strategy rules
+or signals. Older saved charts missing these studies reconstruct them from
+the saved candles for display; saved evaluations and marks stay unchanged. The lower chart uses its own
 indicator units. Combined rule counts remain in the sidebar and confirmed
 signals remain on the candle chart. Panning and zooming synchronize both
 panels; missing values retain timestamp placeholders to preserve alignment.
 
-Validate the dashboard with `node kite/test_dashboard_ui.js`.
+Validate the dashboard with `node kite/tests/test_dashboard_ui.js`.
 
 Chart timestamps are Unix seconds representing the original candle start instant;
 the browser formats them explicitly in `Asia/Kolkata`, independently of its local
@@ -233,15 +236,15 @@ while a notifier alert is recorded.
 Restart the application to enable recording. Select a symbol, choose **Review
 date**, and click **Review saved day**. The chart loads saved candles and indicator
 series; the session list contains evaluations and alerts. Select an entry to see
-its saved rule results, or click a 5m candle to update both condition panels.
+its saved rule results, or click a candle on its recorded confirmation timeframe to update both condition panels.
 Clicking prefers the confirmed candle state, falling back to its last saved
 evaluation. Candles without recordings show an explicit empty state. The selected
 result stays visible while moving the mouse or leaving the chart. BULL/BEAR
-marks remain on the 5m chart. **Return to live** resumes live display. Recording
+marks appear on their recorded confirmation timeframe. **Return to live** resumes live display. Recording
 continues for all configured symbols while reviewing a date.
 
 History survives application restarts. Chart series are checkpointed once per
-5m candle and again at session close, with up to 300 candles per timeframe for
+confirmation candle and again at session close, with up to 600 candles per timeframe for
 indicator context. An abrupt stop may leave the last chart checkpoint incomplete;
 individual committed evaluations remain available. The archive is local and is
 not automatically deleted; monitor disk use, especially with many symbols.
@@ -293,7 +296,7 @@ This version evaluates and records all valid strategies across all symbols. Only
 the active strategy sends alerts. Live charts retain the standard studies; saved
 review uses each strategy's recorded indicators. Confirmed markers use 5-minute
 candle rollover. Other
-confirmation intervals, custom Python evaluators and a visual rule editor are not
+custom Python evaluators and a visual rule editor are not
 part of this version. All dashboard chart timeframes remain collected regardless
 of the profile's rule intervals.
 
@@ -303,11 +306,11 @@ review has a separate **Recorded strategy** selector. Selecting another recorded
 profile does not change the active alert strategy. Changing rules does not rewrite saved snapshots. The history API
 also accepts `strategy_id`; omitting it returns all strategies for compatibility.
 
-Run strategy and existing regression checks from `kite`:
+Run all Kite regression checks from the repository root:
 
 ```bash
-../.venv/bin/python -m unittest discover -p 'test_*.py'
-node test_dashboard_ui.js
+.venv/bin/python -m kite.tests -v
+node kite/tests/test_dashboard_ui.js
 ```
 
 
@@ -315,9 +318,8 @@ node test_dashboard_ui.js
 
 `strategies/btst_setup.json` adds **BTST Daily-Hourly Confluence**, matching the
 seven buy conditions in the supplied PDF, plus the user-requested bearish
-mirror. Each side requires all seven rules (100% threshold). MACD uses user-confirmed 12/26/9 periods. See
-[the BTST condition mapping](STRATEGY_AND_CONDITIONS.md#btst-daily-hourly-confluence)
-for exact boundaries and candle timing. Restart after the parser upgrade, then
+mirror. Each side requires all seven rules (100% threshold). MACD uses user-confirmed 12/26/9 periods. The exact rules are defined in `strategies/btst_setup.json`.
+Restart after the parser upgrade, then
 select and activate this profile. It is added without changing the saved active
 strategy selection.
 
@@ -395,3 +397,36 @@ not multiply that history load. Live prices subsequently use KiteTicker ticks.
 Startup progress is logged every 25 symbols; `/api/health` includes
 `historical_requests` counters. This limiter covers this dashboard/scanner process,
 not separately launched pattern scanners, MTF tools or other API clients.
+
+
+### Strategy confirmation timeframe
+
+A strategy whose candle rules all use one timeframe automatically confirms on
+that timeframe. For example, a strategy with only `3-minute ADX (14) is greater
+than 22 and rising` uses `3m` confirmation. Mixed-timeframe strategies and
+strategies with only tick rules default to `5m`, preserving existing behavior.
+Set `"confirmation_timeframe": "15m"` in a strategy JSON to override this default.
+The dashboard offers `3m`, `5m`, `15m`, `1h`, `4h`, and `1d` chart tabs.
+Tabs do not expand startup history requests or feed subscriptions. The `4h` chart
+uses existing hourly candles.
+The backend supports
+confirmation intervals `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `4h`, and `1d`.
+Each condition keeps its own calculation timeframe; marks are visible in the
+dashboard when their confirmation interval has a matching chart tab.
+
+Live scores and alerts can change while a candle forms. Confirmed marks use the
+last evaluated state before the confirmation candle rolls over; the final observed
+candle is finalized at the normal 15:30 session close after queued ticks and
+evaluations finish. The final evaluation includes the last ingested tick, even
+when the regular evaluation throttle skipped that tick. Startup history is never
+recorded as a live observation before the first live tick. Hourly, 30-minute, and
+4-hour buckets are anchored to 09:15; 4-hour candles are resampled from hourly
+candles. These timings continue to assume a normal NSE session.
+
+Markers and saved candle inspection follow each event's recorded confirmation
+interval. Select that chart interval to see the marks and click its candles.
+The dashboard displays the confirmation interval with the strategy results.
+Previously saved records without interval metadata remain `5m`; changing a
+strategy does not reinterpret old history. SQLite migrates the existing archive
+automatically and separates confirmations on different intervals even when they
+share a candle timestamp. No API credentials or additional dependencies are needed.

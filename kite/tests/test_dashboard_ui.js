@@ -3,16 +3,18 @@ const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/st
 const html=fs.readFileSync(`${__dirname}/../dashboard.html`,'utf8');
 new vm.Script(html.split('<script>')[1].split('</script>')[0]);
 const series=[],scales=new Map();
-const chart={addLineSeries(options){const line={options,applyOptions(value){Object.assign(this.options,value)},setData(points){this.points=points},createPriceLine(options){return {options,applyOptions(value){Object.assign(this.options,value)}}},removePriceLine(){}};series.push(line);return line},priceScale(id){return {applyOptions(options){scales.set(id,options)}}}};
+const chart={addLineSeries(options){const line={options,applyOptions(value){Object.assign(this.options,value)},setData(points){this.points=points},update(point){this.points??=[];assert.ok(!this.points.length||point.time>=this.points.at(-1).time,'series updates must be chronological');if(this.points.at(-1)?.time===point.time)this.points[this.points.length-1]=point;else this.points.push(point)},createPriceLine(options){return {options,applyOptions(value){Object.assign(this.options,value)}}},removePriceLine(){}};series.push(line);return line},priceScale(id){return {applyOptions(options){scales.set(id,options)}}}};
 const event=(time,bull,bear,source='live')=>({candle:{time,open:100,high:102,low:99,close:101},
  bullish:{percentage:bull,passed:bull/100*14,total:14,triggered:bull>=30},
  bearish:{percentage:bear,passed:bear/100*14,total:14,triggered:bear>=30},evaluation_source:source});
+assert.ok(!html.includes('const combinedStrategy=')); // no strategy overlay on price chart
+assert.ok(!html.includes('priceFormatter:')); // preserve per-series indicator units
 let chartCount=0;
 const chartMocks=[];
 const nodes=new Map(),node=()=>({style:{},classList:{toggle(){}},children:[],value:'',append(...items){this.children.push(...items)},replaceChildren(...children){this.children=children;this.value=children[0]?.value??''},setAttribute(key,value){this[key]=value},removeAttribute(key){delete this[key]}});
 const document={getElementById(id){if(!nodes.has(id))nodes.set(id,node());return nodes.get(id)},createElement:node,addEventListener(){},querySelectorAll(){return []}};
 const context=vm.createContext({document,
- LightweightCharts:{CrosshairMode:{Normal:0},createChart(){chartCount++;const mock={...chart,range:null,removeSeries(){},timeScale(){return {subscribeVisibleLogicalRangeChange(callback){mock.rangeCallback=callback},getVisibleLogicalRange(){return mock.range},setVisibleLogicalRange(range){mock.range=range;mock.rangeCallback?.(range)}}},addCandlestickSeries(){return {setData(){},setMarkers(){},update(){}}},subscribeClick(callback){mock.clickCallback=callback},subscribeCrosshairMove(callback){(mock.crosshairCallbacks??=[]).push(callback)},applyOptions(){}};chartMocks.push(mock);return mock}},
+ LightweightCharts:{CrosshairMode:{Normal:0},createChart(){chartCount++;const mock={...chart,range:null,removeSeries(){},timeScale(){return {subscribeVisibleLogicalRangeChange(callback){mock.rangeCallback=callback},getVisibleLogicalRange(){return mock.range},setVisibleLogicalRange(range){mock.range=range;mock.rangeCallback?.(range)}}},addCandlestickSeries(){return {setData(){},setMarkers(){},update(){},createPriceLine(options){return options},removePriceLine(){}}},subscribeClick(callback){mock.clickCallback=callback},subscribeCrosshairMove(callback){(mock.crosshairCallbacks??=[]).push(callback)},applyOptions(){}};chartMocks.push(mock);return mock}},
  ResizeObserver:class{observe(){}},setInterval(){},clearInterval(){},clearTimeout(){},
  fetch(){return new Promise(()=>{})},window:{},console});
 vm.runInContext(html.split('<script>')[1].split('</script>')[0],context);
@@ -116,13 +118,46 @@ const clickedState=()=>JSON.stringify(['bullScore','bearScore','overlayBullScore
 const selection=clickedState();
 for(const time of [2,3,undefined]){hover(time);assert.equal(clickedState(),selection)}
 click(undefined);assert.equal(clickedState(),selection);
-for(const settings of ["reviewMode=false", "reviewMode=true;currentTimeframe='15m'", "currentTimeframe='5m';loadingSnapshot=true"]){
+for(const settings of ["reviewMode=false", "reviewMode=true;loadingSnapshot=true"]){
  vm.runInContext(settings,context);click(2);assert.equal(clickedState(),selection);
 }
 vm.runInContext("loadingSnapshot=false;reviewMode=true;currentTimeframe='5m';resetHistory('loading')",context);
 click(1);
 assert.equal(nodes.get('strategyContext').textContent,'No recorded evaluation for this candle.');
 console.log('Candle click confirmation, fallback, missing data, persistent selection, and live/loading isolation tests passed');
+// Native 3m/15m confirmation and legacy 5m history coexist without remapping.
+vm.runInContext(`
+ const legacyConfirmed={...confirmedEval,bullish:{...confirmedEval.bullish,triggered:true}};
+ const threeMinute={...legacyConfirmed,confirmation_timeframe:'3m',threshold:60};
+ const fifteenMinute={...latestEval,candle:{time:1},confirmation_timeframe:'15m',threshold:90,bearish:{...latestEval.bearish,triggered:true}};
+ const nativeHistory={evaluations:[threeMinute,fifteenMinute],signals:[legacyConfirmed,threeMinute,fifteenMinute]};
+ renderHistory(nativeHistory);candleData=[{time:1}];
+ currentTimeframe='3m';
+`,context);
+click(1);
+assert.equal(nodes.get('threshold').textContent,'60%');
+assert.ok(nodes.get('strategyContext').textContent.includes('confirmation 3m'));
+assert.equal(vm.runInContext('markers(nativeHistory.signals).length',context),1);
+vm.runInContext("currentTimeframe='15m'",context);click(1);
+assert.equal(nodes.get('threshold').textContent,'90%');
+assert.equal(nodes.get('bearScore').textContent,'1 / 1 (100.0%)');
+assert.equal(vm.runInContext('markers(nativeHistory.signals).length',context),1);
+vm.runInContext("currentTimeframe='5m'",context);click(1);
+assert.equal(nodes.get('threshold').textContent,'70%');
+assert.equal(vm.runInContext('markers(nativeHistory.signals).length',context),1);
+// A rule entry selection must not prevent clicking the same candle again.
+vm.runInContext('inspectSaved(fifteenMinute)',context);click(1);
+assert.equal(nodes.get('threshold').textContent,'70%');
+console.log('Strategy-native candle clicks, timeframe marker filtering, and legacy history tests passed');
+// A delayed result from the same strategy's previous version must not repaint
+// the current rules or its confirmation interval after a configuration reload.
+vm.runInContext("reviewMode=false;activeStrategyId='default';activeStrategyVersion='new';renderLive({...confirmedEval,strategy_id:'default',strategy_version:'new',confirmation_timeframe:'3m'})",context);
+const currentRuleState=clickedState();
+vm.runInContext("renderLive({...latestEval,strategy_id:'default',strategy_version:'old',confirmation_timeframe:'5m'})",context);
+assert.equal(clickedState(),currentRuleState);
+vm.runInContext("reviewMode=true;activeStrategyVersion=null",context);
+
+
 
 
 // No strategy HTTP polling: sync only on a change, with duplicate events combined.
@@ -130,7 +165,7 @@ assert.ok(!/setInterval\([^\n]*api\/strategies/.test(html));
 assert.ok(html.includes("data.type==='strategy_changed'"));
 async function testStrategySync(){
  let calls=0,release;
- const syncContext=vm.createContext({Promise,activeStrategyId:'default',activeStrategyVersion:'v1',currentToken:null,
+ const syncContext=vm.createContext({Promise,activeStrategyId:'default',activeStrategyVersion:'v1',currentToken:null,reviewMode:false,
    loadStrategies:async()=>{calls++;await new Promise(resolve=>{release=resolve});syncContext.activeStrategyId='trend';syncContext.activeStrategyVersion='v2'},
    loadSnapshot:async()=>{throw new Error('No symbol selected')}});
  vm.runInContext(html.slice(html.indexOf('let strategyRefresh='),html.indexOf("document.getElementById('activateStrategy').onclick")),syncContext);
@@ -140,6 +175,10 @@ async function testStrategySync(){
  for(let i=0;i<20;i++)vm.runInContext("refreshStrategyState({id:'trend',version:'v2'})",syncContext);
  assert.equal(calls,1);release();await pending;assert.equal(calls,1);
  await vm.runInContext("refreshStrategyState({id:'trend',version:'v2'})",syncContext);assert.equal(calls,1);
+ // An active-strategy change must preserve a saved candle the user is inspecting.
+ syncContext.reviewMode=true;syncContext.currentToken=1;
+ const reviewRefresh=vm.runInContext("refreshStrategyState({id:'trend',version:'v3'})",syncContext);
+ assert.equal(calls,2);release();await reviewRefresh;
 }
 testStrategySync().catch(error=>{console.error(error);process.exitCode=1});
 
@@ -168,12 +207,12 @@ async function testRecordedSessionIsolation(){
  sessionDocument.getElementById('reviewDate').value='2026-10-12';
  const sandbox={document:sessionDocument,console,window:{},reviewMode:true,reviewEvents:[],reviewAlerts:[],reviewFilter:'alerts',reviewRequest:0,
   currentToken:1,currentTimeframe:'5m',reviewStrategyId:'default',activeStrategyId:'default',allSymbols:[{token:1,symbol:'FIRST'},{token:2,symbol:'SECOND'}],
-  candles:{setData(){}},refreshMarkers(){},configureOverlays(){},configureStudies(){},renderOhlc(){},applyLevels(){},resetVisibleRange(){},
-  markers:()=>[],renderSide(){},renderLive(){},renderMarket(){},inspectSaved(event){sandbox.inspected=event},
+  candles:{setData(){}},refreshMarkers(){},configureOverlays(){},configureStudies(){},renderOhlc(){},applyLevels(){},setStatus(){},resetVisibleRange(){},
+  eventTimeframe:event=>event.confirmation_timeframe||'5m',markers:()=>[],renderSide(){},renderLive(){},renderMarket(){},inspectSaved(event){sandbox.inspected=event},
   fetch:url=>new Promise(resolve=>pending.push({url,resolve}))};
  const session=vm.createContext(sandbox);
  vm.runInContext(html.slice(html.indexOf('let reviewCandleStates='),html.indexOf('chart.subscribeClick')),session);
- vm.runInContext(html.slice(html.indexOf('let snapshotRequest='),html.indexOf('function updateCandle(')),session);
+ vm.runInContext(html.slice(html.indexOf('function clearChartSelection('),html.indexOf('function updateCandle(')),session);
  const selectionCode=html.slice(html.indexOf('async function loadReviewStrategies('),html.indexOf('function matchingSymbols('));
  vm.runInContext(selectionCode,session);
  const evaluation={...event(1,100,0),market_time:'2026-10-12T10:00:00+05:30',alert_side:'bullish'};
@@ -225,3 +264,105 @@ async function testRecordedSessionIsolation(){
  console.log('Recorded session empty states, immediate clearing, event filters, and request race tests passed');
 }
 testRecordedSessionIsolation().catch(error=>{console.error(error);process.exitCode=1});
+
+// Live study lines may share IDs (for example OBV with different EMA periods).
+// Only the selected study may write to the displayed series.
+vm.runInContext(`
+ reviewMode=false;loadingSnapshot=false;currentToken=1;currentTimeframe='3m';
+ candleData=[{time:1,open:100,high:101,low:99,close:100}];window.lastCandleTime=1;
+ renderedMarketToken=null;clearOverlays();
+ configureStudies([
+  {id:'obv5',label:'OBV 5',lines:[{id:'obv',label:'OBV',points:[{time:1,value:10}]}]},
+  {id:'obv9',label:'OBV 9',lines:[{id:'obv',label:'OBV',points:[{time:1,value:20}]}]}
+ ]);
+ updateCandle({instrument_token:1,candles_by_timeframe:{'3m':{time:2,open:101,high:102,low:100,close:101}}});
+`,context);
+assert.equal(series.at(-1).points.at(-1).time,2);
+assert.equal(series.at(-1).points.at(-1).value,undefined); // retain timeline before the evaluation arrives
+vm.runInContext(`updateStudy({instrument_token:1,study_values:{timeframe:'3m',studies:[
+ {id:'obv5',lines:[{id:'obv',time:2,value:11}]},
+ {id:'obv9',lines:[{id:'obv',time:2,value:99}]}
+]}})`,context);
+assert.equal(series.at(-1).points.at(-1).value,11);
+vm.runInContext(`updateCandle({instrument_token:1,candles_by_timeframe:{'3m':{time:3,open:102,high:103,low:101,close:102}}});
+ updateStudy({instrument_token:1,study_values:{timeframe:'3m',studies:[{id:'obv5',lines:[{id:'obv',time:2,value:12}]}]}});`,context);
+assert.equal(series.at(-1).points.at(-1).time,3); // late study cannot update behind the chart's last point
+assert.equal(series.at(-1).points.at(-1).value,undefined);
+vm.runInContext("selectedStudy='obv9';drawSelectedStudy()",context);
+assert.equal(series.at(-1).points[1].value,99); // unselected studies still receive their own values
+
+// Evaluations can lag ticks without being stale relative to the last evaluation.
+vm.runInContext(`
+ renderedEvaluationToken=null;activeStrategyVersion=null;
+ renderMarket({instrument_token:1,market_time:'2026-10-12T10:05:00+05:30',price:105});
+ renderLive({...confirmedEval,instrument_token:1,market_time:'2026-10-12T10:04:00+05:30'});
+`,context);
+assert.equal(nodes.get('bullScore').textContent,'1 / 1 (100.0%)');
+vm.runInContext("renderLive({...latestEval,instrument_token:1,market_time:'2026-10-12T10:03:00+05:30'})",context);
+assert.equal(nodes.get('bullScore').textContent,'1 / 1 (100.0%)');
+assert.equal(nodes.get('price').textContent,'105.00');
+vm.runInContext("reviewMode=true;candleData=[{time:1,high:100,low:100}];levelsVisible=true;applyLevels({previous_high:110})",context);
+assert.equal(vm.runInContext('liveFlatMarker().length',context),0);
+assert.equal(vm.runInContext('priceLines.length',context),1);
+vm.runInContext('resetHistory()',context);
+assert.equal(vm.runInContext('priceLines.length',context),0);
+assert.equal(nodes.get('threshold').textContent,'—');
+console.log('Study isolation, candle alignment, delayed evaluations, and saved-chart clearing tests passed');
+
+async function testLiveSnapshotFailure(){
+ const pending=[];
+ context.fetch=url=>new Promise(resolve=>pending.push({url,resolve}));
+ vm.runInContext("reviewMode=false;currentToken=1;candleData=[{time:1}];document.getElementById('price').textContent='999'",context);
+ const failed=vm.runInContext('loadSnapshot(1)',context);
+ assert.equal(vm.runInContext('candleData.length',context),0);
+ assert.equal(nodes.get('price').textContent,'—');
+ pending.shift().resolve({ok:false,text:async()=>'Snapshot unavailable'});
+ await assert.rejects(failed,/Snapshot unavailable/);
+ vm.runInContext("updateCandle({instrument_token:1,candles_by_timeframe:{'3m':{time:4}}})",context);
+ assert.equal(vm.runInContext('candleData.length',context),0);
+ assert.ok(nodes.get('strategyContext').textContent.includes('Use Live to retry'));
+ const retried=vm.runInContext('loadSnapshot(1)',context);
+ pending.shift().resolve({ok:true,json:async()=>({candles:[{time:5,open:100,high:102,low:99,close:101}],overlays:[],studies:[],signals:[],levels:{},threshold:90})});
+ await retried;
+ assert.equal(vm.runInContext('loadingSnapshot',context),false);
+ assert.equal(vm.runInContext('candleData[0].time',context),5);
+ console.log('Live snapshot failure, immediate clearing, and retry tests passed');
+}
+testLiveSnapshotFailure().catch(error=>{console.error(error);process.exitCode=1});
+
+// Exercise the real WebSocket handler, including rule ticks/crosses, while
+// chart rendering fails. Saved-day inspection must remain isolated.
+function testLiveRuleDelivery(){
+ const liveNodes=new Map();
+ const liveDocument={getElementById(id){if(!liveNodes.has(id))liveNodes.set(id,node());return liveNodes.get(id)},createElement:node};
+ const clients=[],errors=[];
+ const live={document:liveDocument,console:{error:(...args)=>errors.push(args)},location:{protocol:'http:',host:'localhost'},
+  WebSocket:class{constructor(){clients.push(this)}close(){}},socket:null,heartbeat:null,reconnectTimer:null,
+  clearInterval(){},clearTimeout(){},setStatus(){},currentToken:1,currentTimeframe:'3m',reviewMode:false,loadingSnapshot:false,
+  matchesActiveStrategy:()=>true,renderMarket(){},renderedEvaluationToken:null,renderedEvaluationTime:0,
+  refreshStrategyState:async()=>{},eventTimeframe:event=>event.confirmation_timeframe||'5m',
+  updateCandle(){throw new Error('candle failure')},updateStudy(){throw new Error('study failure')}};
+ const ctx=vm.createContext(live);
+ vm.runInContext(html.slice(html.indexOf('function timeframe('),html.indexOf('function ema(')),ctx);
+ vm.runInContext(html.slice(html.indexOf('function renderLive('),html.indexOf('function clearOverlays(')),ctx);
+ vm.runInContext(html.slice(html.indexOf('function connect('),html.indexOf('function inspectSaved(')),ctx);
+ vm.runInContext('connect(1)',ctx);
+ const send=(passed,token=1)=>clients[0].onmessage({data:JSON.stringify({
+  type:'strategy_update',instrument_token:token,market_time:'2026-10-13T11:00:00+05:30',
+  confirmation_timeframe:'3m',bullish:{passed:passed?1:0,total:1,percentage:passed?100:0,rules:[{text:'3-minute bull rule',passed}]},
+  bearish:{passed:passed?0:1,total:1,percentage:passed?0:100,rules:[{text:'3-minute bear rule',passed:!passed}]}
+ })});
+ send(true);
+ assert.equal(liveNodes.get('bullRules').children[0].children[0].textContent,'✓');
+ assert.equal(liveNodes.get('bearRules').children[0].children[0].textContent,'×');
+ send(false);
+ assert.equal(liveNodes.get('bullRules').children[0].children[0].textContent,'×');
+ assert.equal(liveNodes.get('bearRules').children[0].children[0].textContent,'✓');
+ assert.equal(errors.length,4);
+ send(true,2); // another symbol cannot alter the panels
+ live.reviewMode=true;send(true);
+ live.reviewMode=false;live.loadingSnapshot=true;send(true);
+ assert.equal(liveNodes.get('bullRules').children[0].children[0].textContent,'×');
+ console.log('WebSocket rule ticks/crosses update despite chart failures; review and symbol isolation passed');
+}
+testLiveRuleDelivery();

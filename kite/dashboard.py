@@ -17,7 +17,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse
 
 from scanner import RealtimeScanner, strategy_log, history_requests
-from strategy_runtime import SUPPORTED_TIMEFRAMES, chart_snapshot, live_study_values, historical_evaluation
+from strategy_runtime import SUPPORTED_TIMEFRAMES, chart_snapshot, live_study_values, historical_evaluation, profile_chart_snapshot, restore_missing_chart_studies
 
 
 KITE_DIR = Path(__file__).resolve().parent
@@ -124,10 +124,16 @@ class LiveBridge:
                 timeframe = subscription["timeframe"]
                 if event.get('type') != 'candle_update' and timeframe not in study_cache:
                     symbol_data = scanner.symbol_data.get(event["instrument_token"])
-                    study_cache[timeframe] = await asyncio.to_thread(
-                        live_study_values, symbol_data, timeframe)
+                    try:
+                        study_cache[timeframe] = await asyncio.to_thread(
+                            live_study_values, symbol_data, timeframe, getattr(scanner, 'active_strategy', None))
+                    except Exception:
+                        # A study failure must not unsubscribe a healthy client
+                        # or suppress the already-evaluated condition panels.
+                        strategy_log.exception('Dashboard study calculation failed: %s %s', event['symbol'], timeframe)
+                        study_cache[timeframe] = None
                 payload = dict(event)
-                if timeframe in study_cache:
+                if study_cache.get(timeframe) is not None:
                     payload["study_values"] = study_cache[timeframe]
                 await socket.send_json(payload)
             except Exception:
@@ -255,14 +261,17 @@ def snapshot(instrument_token: int, timeframe: str = "5m"):
             raise HTTPException(404, "Symbol is not subscribed or scanner is still starting")
         if timeframe not in SUPPORTED_TIMEFRAMES:
             raise HTTPException(400, f"Timeframe must be one of: {', '.join(SUPPORTED_TIMEFRAMES)}")
-        payload = chart_snapshot(symbol_data, timeframe=timeframe)
+        payload = chart_snapshot(symbol_data, timeframe=timeframe, limit=600)
+        if hasattr(scanner, 'active_strategy'):
+            payload = profile_chart_snapshot(symbol_data, timeframe, scanner.active_strategy, limit=600, base=payload)
         strategy = scanner.latest_results.get(instrument_token)
         if strategy is not None and hasattr(scanner, 'active_strategy') and strategy.get('strategy_version') is not None and strategy['strategy_version'] != scanner.active_strategy['version']:
             strategy = None
         if strategy is None:
             with symbol_data._lock:
                 strategy = historical_evaluation(symbol_data, scanner.bullish_conditions,
-                                                 scanner.bearish_conditions, scanner.alert_threshold)
+                                                 scanner.bearish_conditions, scanner.alert_threshold,
+                                                 getattr(scanner, 'active_strategy', {}).get('confirmation_timeframe', '5m'))
         if strategy is not None and hasattr(scanner, 'active_strategy'):
             strategy = {**strategy, 'strategy_id': scanner.active_strategy['id'],
                         'strategy_name': scanner.active_strategy['name'],
@@ -276,6 +285,7 @@ def snapshot(instrument_token: int, timeframe: str = "5m"):
                 datetime.now(ZoneInfo('Asia/Kolkata')).date().isoformat(),
                 'confirmed', getattr(scanner, 'active_strategy', {}).get('id', 'default')),
             "threshold": scanner.alert_threshold,
+            "confirmation_timeframe": getattr(scanner, 'active_strategy', {}).get('confirmation_timeframe', '5m'),
         })
         return payload
 
@@ -306,6 +316,7 @@ def history_day(instrument_token: int, day: str, timeframe: str = "5m", strategy
              if strategy_id else scanner.history.chart(instrument_token, day, timeframe))
     if chart is None:
         raise HTTPException(404, "No recorded chart for this date")
+    chart = restore_missing_chart_studies(chart, timeframe)
     evaluations = scanner.history.events(instrument_token, day, 'evaluation', strategy_id)
     return {**chart, "instrument_token": instrument_token, "day": day,
             "strategy": evaluations[-1] if evaluations else None,

@@ -6,6 +6,8 @@ import re
 from pathlib import Path
 from conditions import Condition
 
+CONFIRMATION_TIMEFRAMES = ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d")
+
 
 class StrategyStore:
     def __init__(self, root):
@@ -62,9 +64,14 @@ class StrategyStore:
                 parsed[side].append(condition)
         if not any(parsed.values()):
             raise ValueError('Strategy must contain at least one rule')
+        rule_intervals = {rule.interval for rules in parsed.values() for rule in rules} - {'tick'}
+        inferred = next(iter(rule_intervals)) if len(rule_intervals) == 1 else '5m'
+        confirmation = raw.get('confirmation_timeframe', inferred)
+        if confirmation not in CONFIRMATION_TIMEFRAMES:
+            raise ValueError('confirmation_timeframe must be one of: ' + ', '.join(CONFIRMATION_TIMEFRAMES))
         name = raw.get('name', strategy_id)
         if not isinstance(name, str) or not name.strip():
             raise ValueError('Strategy name must be nonempty')
         return {'id': strategy_id, 'name': name, 'threshold': threshold,
-                'cooldown_seconds': cooldown, **parsed,
+                'cooldown_seconds': cooldown, 'confirmation_timeframe': confirmation, **parsed,
                 'version': hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()[:16]}

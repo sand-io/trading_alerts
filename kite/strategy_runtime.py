@@ -22,7 +22,8 @@ from conditions import (
 )
 
 
-SUPPORTED_TIMEFRAMES = ("3m", "5m", "15m", "1h", "1d")
+BASE_TIMEFRAMES = ("3m", "5m", "15m", "1h", "1d")
+SUPPORTED_TIMEFRAMES = ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d")
 OVERLAY_SPECS = {
     "3m": (("ema20", "EMA 20", "#3d9df5", 20, "close", True),
            ("ema50", "EMA 50", "#f2b84b", 50, "close", True)),
@@ -35,6 +36,9 @@ OVERLAY_SPECS = {
     "1d": (("ema9", "EMA 9", "#3d9df5", 9, "close", True),
            ("ema50", "EMA 50", "#f2b84b", 50, "close", True)),
 }
+
+for _timeframe in ("1m", "30m", "4h"):
+    OVERLAY_SPECS[_timeframe] = ()
 
 
 @dataclass(frozen=True)
@@ -123,8 +127,8 @@ def _series_points(frame, values) -> list[dict[str, Any]]:
 
 
 def _strategy_studies(frame, timeframe: str) -> list[dict[str, Any]]:
-    """Build the lower-pane studies actually referenced by the strategy."""
-    if timeframe == "5m":
+    """Build default chart studies when no profile-specific study is available."""
+    if timeframe in ("3m", "5m"):
         adx = calculate_adx(frame, 14)
         obv = calculate_obv(frame)
         obv_ema = calculate_ema(obv, 5)
@@ -152,7 +156,7 @@ def _strategy_studies(frame, timeframe: str) -> list[dict[str, Any]]:
                      {"id": "macd", "label": "MACD", "color": "#3d9df5", "points": _series_points(frame, macd)},
                      {"id": "signal", "label": "Signal", "color": "#f2b84b", "points": _series_points(frame, signal)},
                  ], "levels": [{"value": 0, "label": "Zero", "color": "#627287"}]}]
-    if timeframe in ("1h", "1d"):
+    if timeframe in ("1h", "4h", "1d"):
         rsi = calculate_rsi(frame["close"], 14)
         return [{"id": "rsi", "label": "RSI (14)", "format": "number", "default_visible": True,
                  "lines": [{"id": "rsi", "label": "RSI", "color": "#a78bfa", "points": _series_points(frame, rsi)}],
@@ -163,14 +167,24 @@ def _strategy_studies(frame, timeframe: str) -> list[dict[str, Any]]:
     return []
 
 
-def live_study_values(symbol_data, timeframe: str) -> dict[str, Any]:
+def restore_missing_chart_studies(chart, timeframe):
+    """Fill old 3m/4h chart displays from saved candles, without changing records."""
+    if timeframe not in ('3m', '4h') or chart.get('studies') or not chart.get('candles'):
+        return chart
+    frame = pd.DataFrame(chart['candles'])
+    frame['time'] = pd.to_datetime(frame['time'], unit='s', utc=True)
+    return {**chart, 'studies': _strategy_studies(frame, timeframe)}
+
+
+def live_study_values(symbol_data, timeframe: str, profile=None) -> dict[str, Any]:
     """Return latest strategy readouts for an active dashboard client."""
     if timeframe not in SUPPORTED_TIMEFRAMES:
         return {"timeframe": timeframe, "studies": []}
-    frame = symbol_data.get_dataframe(timeframe).tail(300).copy()
+    frame = symbol_data.get_dataframe(timeframe).tail(600).copy()
     if frame.empty:
         return {"timeframe": timeframe, "studies": []}
-    studies = _strategy_studies(frame, timeframe)
+    studies = (profile_chart_snapshot(symbol_data, timeframe, profile, limit=600)["studies"]
+               if profile else _strategy_studies(frame, timeframe))
     compact = []
     for study in studies:
         lines = []
@@ -193,9 +207,9 @@ def missing_rule_timeframes(symbol_data, bullish_conditions, bearish_conditions)
 
 
 def historical_evaluation(symbol_data, bullish_conditions, bearish_conditions,
-                          threshold: float):
+                          threshold: float, confirmation_timeframe: str = "5m"):
     """Read-only fallback; never emits alerts or creates confirmed signals."""
-    frame = symbol_data.get_dataframe('5m')
+    frame = symbol_data.get_dataframe(confirmation_timeframe)
     if frame.empty:
         return None
     row = frame.iloc[-1]
@@ -210,7 +224,8 @@ def historical_evaluation(symbol_data, bullish_conditions, bearish_conditions,
     missing = missing_rule_timeframes(symbol_data, bullish_conditions, bearish_conditions)
     if missing:
         bullish, bearish = replace(bullish, triggered=False), replace(bearish, triggered=False)
-    event = live_event(symbol_data, price, vwap, bullish, bearish)
+    event = live_event(symbol_data, price, vwap, bullish, bearish,
+                       confirmation_timeframe=confirmation_timeframe)
     event.update(data_ready=not missing, missing_timeframes=missing)
     event['evaluation_source'] = 'historical'
     event['as_of'] = _epoch_seconds(row['time'])
@@ -350,7 +365,8 @@ def chart_snapshot(symbol_data, timeframe: str = "5m", limit: int = 300) -> dict
 
 
 def live_event(symbol_data, ltp: float, vwap: float, bullish: SideResult,
-               bearish: SideResult, market_time: datetime | None = None) -> dict[str, Any]:
+               bearish: SideResult, market_time: datetime | None = None,
+               confirmation_timeframe: str = "5m") -> dict[str, Any]:
     if market_time is not None and market_time.tzinfo is None:
         market_time = market_time.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
     candles_by_timeframe = {}
@@ -358,7 +374,7 @@ def live_event(symbol_data, ltp: float, vwap: float, bullish: SideResult,
         frame = symbol_data.get_dataframe(timeframe)
         if not frame.empty:
             candles_by_timeframe[timeframe] = _candle_dict(frame.iloc[-1])
-    candle = candles_by_timeframe.get("5m")
+    candle = candles_by_timeframe.get(confirmation_timeframe)
     return {
         "type": "strategy_update",
         "symbol": symbol_data.symbol,
@@ -370,6 +386,7 @@ def live_event(symbol_data, ltp: float, vwap: float, bullish: SideResult,
         "price": float(ltp),
         "vwap": float(vwap) if vwap is not None else None,
         "candle": candle,
+        "confirmation_timeframe": confirmation_timeframe,
         "candles_by_timeframe": candles_by_timeframe,
         "bullish": bullish.to_dict(),
         "bearish": bearish.to_dict(),
@@ -380,7 +397,8 @@ def profile_chart_snapshot(symbol_data, timeframe, profile, limit=300, base=None
     """Archive the indicators used by this profile with its shared candle history."""
     chart = dict(base) if base is not None else chart_snapshot(symbol_data, timeframe, limit)
     frame = symbol_data.get_dataframe(timeframe).tail(limit).copy()
-    chart.update(strategy_id=profile['id'], strategy_version=profile['version'])
+    chart.update(strategy_id=profile['id'], strategy_version=profile['version'],
+                 confirmation_timeframe=profile.get('confirmation_timeframe', '5m'))
     if frame.empty:
         return chart
     conditions = [rule for rule in profile['bullish'] + profile['bearish'] if rule.interval == timeframe]
@@ -449,5 +467,6 @@ def profile_chart_snapshot(symbol_data, timeframe, profile, limit=300, base=None
             study('range_atr', 'Range / ATR', [('range', f'{count}-candle range', values),
                   ('atr_multiple', f'{multiplier:g} x ATR ({period})', calculate_atr(frame, period) * multiplier)], format='price')
     chart['overlays'] = list(overlays.values())
-    chart['studies'] = list(studies.values())
+    chart['studies'] = (list(studies.values()) or
+                        (_strategy_studies(frame, timeframe) if timeframe in ('3m', '4h') else []))
     return chart

@@ -31,7 +31,8 @@ class TestLiveDashboard(unittest.TestCase):
         self.assertEqual(set(overlays), {'ema20', 'ema50', 'vwap'})
         self.assertTrue(overlays['ema20']['points'])
         self.assertTrue(overlays['ema50']['points'])
-        self.assertEqual(snapshot['studies'], [])
+        self.assertEqual([study['id'] for study in snapshot['studies']], ['adx', 'obv', 'range_atr'])
+        self.assertTrue(snapshot['studies'][0]['lines'][0]['points'])
         for minute, price, volume in ((15, 100, 100), (17, 102, 120), (18, 101, 140)):
             data.add_tick({'timestamp': datetime(2026, 10, 8, 9, minute),
                            'last_price': price, 'volume': volume, 'average_price': 101})

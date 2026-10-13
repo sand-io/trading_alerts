@@ -152,6 +152,7 @@ def snapshot(*args, **kwargs):
     time.sleep(.2)
     return {'candles': []}
 dashboard.chart_snapshot = snapshot
+dashboard.profile_chart_snapshot = lambda *args, **kwargs: kwargs['base']
 uvicorn.run(dashboard.app, host='127.0.0.1', port=0, log_level='info')
 '''
         process = subprocess.Popen([sys.executable, '-u', '-c', script],
@@ -213,6 +214,27 @@ uvicorn.run(dashboard.app, host='127.0.0.1', port=0, log_level='info')
 
 
 class TestDashboardShutdown(unittest.IsolatedAsyncioTestCase):
+    async def test_study_failure_keeps_live_rules_and_subscription(self):
+        from unittest.mock import AsyncMock
+        bridge = dashboard.LiveBridge()
+        socket = Mock(send_json=AsyncMock())
+        bridge.clients[socket] = {'symbol': 'NSE:TEST', 'timeframe': '3m'}
+        bridge.add_subscription('NSE:TEST')
+        event = {'type': 'strategy_update', 'symbol': 'NSE:TEST', 'instrument_token': 1,
+                 'bullish': {'rules': [{'text': 'Bull rule', 'passed': True}]},
+                 'bearish': {'rules': [{'text': 'Bear rule', 'passed': False}]}}
+        with patch.object(dashboard, 'live_study_values', side_effect=ValueError('study unavailable')):
+            with self.assertLogs('kite.strategy', level='ERROR'):
+                await bridge.broadcast(event)
+        socket.send_json.assert_awaited_once_with(event)
+        self.assertIn(socket, bridge.clients)
+        self.assertEqual(bridge._subscription_counts['NSE:TEST'], 1)
+        studies = {'timeframe': '3m', 'studies': []}
+        with patch.object(dashboard, 'live_study_values', return_value=studies):
+            await bridge.broadcast(event)
+        self.assertEqual(socket.send_json.await_count, 2)
+        self.assertEqual(socket.send_json.call_args.args[0]['study_values'], studies)
+
     async def test_bridge_cancels_pending_broadcasts_and_unsubscribes(self):
         bridge = dashboard.LiveBridge()
         bridge.loop = asyncio.get_running_loop()

@@ -1,6 +1,7 @@
 {
   "name": "strategy 1",
   "threshold": 90.0,
+  "confirmation_timeframe": "5m",
   "bullish": [
     "5-minute ADX (14) is greater than 22 and rising",
     "5-minute Close is greater than First 15-minute High (or Previous Day High)",
