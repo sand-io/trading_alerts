@@ -1,20 +1,24 @@
 import json
+import logging
 import math
 import os
 import queue
 import sys
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import pandas as pd
 from kiteconnect import KiteConnect, KiteTicker
 
-from conditions import load_conditions_from_file
 from notifier import notifier
-from strategy_runtime import evaluate_side, live_event, resolve_direction
-from strategy_runtime import _candle_dict, SUPPORTED_TIMEFRAMES
+from history import HistoryStore
+from historical import HistoricalRequests
+from strategies import StrategyStore
+from strategy_runtime import evaluate_side, live_event, resolve_direction, missing_rule_timeframes
+from strategy_runtime import _candle_dict, SUPPORTED_TIMEFRAMES, BASE_TIMEFRAMES, chart_snapshot, profile_chart_snapshot
 
 # pyrefly: ignore [missing-import]
 from dotenv import load_dotenv
@@ -23,9 +27,17 @@ load_dotenv(ENV_FILE)
 
 KITE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = KITE_DIR / "config.json"
-BULLISH_FILE = KITE_DIR / "bullish.txt"
-BEARISH_FILE = KITE_DIR / "bearish.txt"
 MARKET_TZ = ZoneInfo("Asia/Kolkata")
+strategy_log = logging.getLogger('kite.strategy')
+if not strategy_log.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s IST [STRATEGY] %(levelname)s %(message)s', '%Y-%m-%d %H:%M:%S')
+    formatter.converter = lambda *_: datetime.now(MARKET_TZ).timetuple()
+    handler.setFormatter(formatter)
+    strategy_log.addHandler(handler)
+strategy_log.setLevel(logging.INFO)
+strategy_log.propagate = False
+history_requests = HistoricalRequests(log=strategy_log)
 
 
 def market_datetime(value):
@@ -70,7 +82,7 @@ def resample_candles(df_1h, target_interval='4h'):
     df = df.set_index('time')
     
     # Resample candles in 4-hour intervals starting from the market open (9:15 AM)
-    resampled = df.resample('4h', closed='left', label='left', origin='9:15').agg({
+    resampled = df.resample('4h', closed='left', label='left', origin='start_day', offset=timedelta(hours=9, minutes=15)).agg({
         'open': 'first',
         'high': 'max',
         'low': 'min',
@@ -89,26 +101,29 @@ class SymbolData:
         self.candles = {}       # interval -> list of candle dicts
         self.last_tick_time = {} # interval -> last bucket datetime
         self._lock = threading.RLock()
+        self.history_errors = {}
+        self.history_stop = None
 
     def check_and_add_intervals(self, kite, required_intervals):
         """
         Dynamically initializes candle tracking for new intervals on-the-fly.
         """
-        # If 4h is in required, make sure 1h is also added so we can compile 4h candles
-        resolved_intervals = set(required_intervals)
-        if '4h' in resolved_intervals:
-            resolved_intervals.add('1h')
+        with self._lock:
+            # If 4h is in required, make sure 1h is also added so we can compile 4h candles
+            resolved_intervals = set(required_intervals)
+            if '4h' in resolved_intervals:
+                resolved_intervals.add('1h')
 
-        for iv in resolved_intervals:
-            if iv in ['tick', '4h']:
-                continue
-            if iv not in self.intervals:
-                if os.getenv("VERBOSE", "false").lower() == "true":
-                    print(f"[SYSTEM] Initializing candle tracking for {self.symbol} on {iv} interval...")
-                self.candles[iv] = []
-                self.last_tick_time[iv] = None
-                self.intervals.add(iv)
-                self.initialize_historical_candles(kite, iv)
+            for iv in resolved_intervals:
+                if iv in ['tick', '4h']:
+                    continue
+                if iv not in self.intervals:
+                    if os.getenv("VERBOSE", "false").lower() == "true":
+                        print(f"[SYSTEM] Initializing candle tracking for {self.symbol} on {iv} interval...")
+                    self.candles[iv] = []
+                    self.last_tick_time[iv] = None
+                    self.intervals.add(iv)
+                    self.initialize_historical_candles(kite, iv)
 
     def initialize_historical_candles(self, kite, iv):
         # Map our interval strings to Kite's historical interval strings
@@ -140,7 +155,7 @@ class SymbolData:
                 
             if os.getenv("VERBOSE", "false").lower() == "true":
                 print(f"[HISTORICAL] Fetching {iv} data for {self.symbol}...")
-            records = kite.historical_data(self.instrument_token, from_date, to_date, kite_interval)
+            records = history_requests.fetch(kite, self.instrument_token, from_date, to_date, kite_interval, stop=self.history_stop)
             
             candles_list = []
             session_value = 0.0
@@ -177,10 +192,15 @@ class SymbolData:
             
             self.candles[iv] = candles_list
             if candles_list:
+                self.history_errors.pop(iv, None)
+            else:
+                self.history_errors[iv] = 'Historical API returned no candles'
+            if candles_list:
                 self.last_tick_time[iv] = candles_list[-1]['time']
             if os.getenv("VERBOSE", "false").lower() == "true":
                 print(f"[HISTORICAL] Successfully loaded {len(candles_list)} historical candles for {self.symbol} ({iv})")
         except Exception as e:
+            self.history_errors[iv] = str(e)
             if os.getenv("VERBOSE", "false").lower() == "true":
                 print(f"[HISTORICAL WARNING] Could not fetch history for {self.symbol} ({iv}): {e}")
                 print(f"                     Will build candles in real-time starting from first tick.")
@@ -318,14 +338,12 @@ class SymbolData:
         elif interval == '15m':
             minute = (dt.minute // 15) * 15
             return dt.replace(minute=minute, second=0, microsecond=0)
-        elif interval == '30m':
-            minute = (dt.minute // 30) * 30
-            return dt.replace(minute=minute, second=0, microsecond=0)
-        elif interval == '1h':
+        elif interval in ('30m', '1h', '4h'):
             # NSE hourly candles are anchored to the 09:15 session open.
             session_open = dt.replace(hour=9, minute=15, second=0, microsecond=0)
             elapsed_minutes = max(0, int((dt - session_open).total_seconds() // 60))
-            return session_open + timedelta(minutes=(elapsed_minutes // 60) * 60)
+            duration = {'30m': 30, '1h': 60, '4h': 240}[interval]
+            return session_open + timedelta(minutes=(elapsed_minutes // duration) * duration)
         elif interval == '1d':
             return dt.replace(hour=0, minute=0, second=0, microsecond=0)
         return dt
@@ -349,8 +367,6 @@ class RealtimeScanner:
     def __init__(self, event_callback=None, status_callback=None):
         # Load environment variables
         load_dotenv(ENV_FILE, override=True)
-        self.alert_threshold = float(os.getenv("ALERT_THRESHOLD", "100.0"))
-        print(f"[SYSTEM] Alert threshold set to {self.alert_threshold}%")
         
         self.config = {}
         self.kite = None
@@ -360,8 +376,6 @@ class RealtimeScanner:
         
         self.bullish_conditions = []
         self.bearish_conditions = []
-        self.bullish_mtime = 0
-        self.bearish_mtime = 0
         
         self.last_reload_check = 0
         self.reload_cooldown = 5  # reload config/conditions files every 5s if modified
@@ -370,6 +384,9 @@ class RealtimeScanner:
         self.symbol_data = {}  # token -> SymbolData
         self.event_callback = event_callback
         self.status_callback = status_callback
+        self.history = HistoryStore(os.getenv("KITE_HISTORY_DB", str(KITE_DIR / "data" / "history.sqlite3")))
+        self._archived_chart_candles = {}
+        self.history_error = None
         self.latest_results = {}
         self.confirmed_signals = {}
         self._process_lock = threading.RLock()
@@ -394,7 +411,146 @@ class RealtimeScanner:
         self.latest_market_results = {}
         
         self.load_config()
-        self.load_conditions()
+        self.strategy_store = StrategyStore(KITE_DIR)
+        self.active_strategy = self.strategy_store.load('default')
+        self.bullish_conditions = self.active_strategy['bullish']
+        self.bearish_conditions = self.active_strategy['bearish']
+        self.alert_threshold = self.active_strategy['threshold']
+        self.recording_profiles = {self.active_strategy['id']: self.active_strategy}
+        self.strategy_states = {}
+        self.profile_errors = {}
+        self._bind_active_state()
+        self._strategy_generation = 0
+        self.strategy_error = None
+        try:
+            selected = self.strategy_store.selected()
+            if selected != 'default':
+                self.activate_strategy(selected, persist=False, source='startup restore')
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            self.strategy_error = str(exc)
+            strategy_log.warning('Saved strategy could not be restored; using %s: %s', self.active_strategy['name'], exc)
+        self.refresh_recording_profiles()
+        strategy_log.info('Active: %s [%s] | threshold=%g%% | bullish=%d bearish=%d | version=%s',
+                          self.active_strategy['name'], self.active_strategy['id'], self.alert_threshold,
+                          len(self.bullish_conditions), len(self.bearish_conditions), self.active_strategy['version'])
+
+    def strategy_info(self):
+        profile = self.active_strategy
+        return {key: profile[key] for key in ('id', 'name', 'version', 'threshold', 'cooldown_seconds', 'confirmation_timeframe')}
+
+    def _profile_state(self, profile):
+        return self.strategy_states.setdefault(profile['id'], {
+            'latest': {}, 'prior': {}, 'confirmed': {}, 'finalized': {}})
+
+    def _bind_active_state(self):
+        state = self._profile_state(self.active_strategy)
+        self.latest_results = state['latest']
+        self._prior_results = state['prior']
+        self.confirmed_signals = state['confirmed']
+        self._finalized_candles = state['finalized']
+
+    def refresh_recording_profiles(self):
+        """Load all valid profiles; retain last working rules on invalid edits."""
+        errors = {}
+        available = self.strategy_store.profiles()
+        present = {item['id'] for item in available}
+        for item in available:
+            identifier = item['id']
+            try:
+                if item.get('error'):
+                    raise ValueError(item['error'])
+                profile = self.strategy_store.load(identifier)
+                previous = self.recording_profiles.get(identifier)
+                if previous and previous['version'] == profile['version']:
+                    continue
+                if identifier == self.active_strategy['id']:
+                    self.activate_strategy(identifier, persist=False)
+                else:
+                    self._merge_profile_history(self._prepare_profile_history(profile))
+                    self.recording_profiles[identifier] = profile
+                    strategy_log.info('Recording enabled: %s [%s] | version=%s',
+                                      profile['name'], identifier, profile['version'])
+            except (ValueError, OSError, TypeError, KeyError) as exc:
+                errors[identifier] = str(exc)
+                if self.profile_errors.get(identifier) != str(exc):
+                    strategy_log.warning('Recording profile [%s] rejected; keeping last working rules if available: %s', identifier, exc)
+        for identifier in list(self.recording_profiles):
+            if identifier not in present and identifier != self.active_strategy['id']:
+                del self.recording_profiles[identifier]
+        self.profile_errors = errors
+        self.strategy_error = errors.get(self.active_strategy['id'])
+
+    @staticmethod
+    def _profile_intervals(profile):
+        intervals = set(BASE_TIMEFRAMES)
+        intervals.add(profile.get('confirmation_timeframe', '5m'))
+        for condition in profile['bullish'] + profile['bearish']:
+            intervals.add(condition.interval)
+            if condition.rule_type in ('yesterday_compare', 'multi_day_close', 'opening_or_previous_day'):
+                intervals.add('1d')
+        if '4h' in intervals:
+            intervals.add('1h')
+        return intervals - {'4h', 'tick'}
+
+    def _prepare_profile_history(self, profile):
+        prepared = {}
+        for token, data in self.symbol_data.items():
+            # Startup and activation share SymbolData. Check under its lock so
+            # a switch cannot refetch intervals currently being initialized.
+            with data._lock:
+                candidate = SymbolData(token, data.symbol)
+                candidate.history_stop = self._stop_requested
+                candidate.check_and_add_intervals(self.kite, self._profile_intervals(profile) - data.intervals)
+            for interval, rows in candidate.candles.items():
+                if not rows:
+                    detail = candidate.history_errors.get(interval, 'No historical candles available')
+                    strategy_log.warning('History unavailable for %s [%s], strategy=%s: %s; activation continues, waiting for candle data',
+                                         data.symbol, interval, profile['id'], detail)
+            prepared[token] = candidate
+        return prepared
+
+    def _merge_profile_history(self, prepared):
+        for token, candidate in prepared.items():
+            data = self.symbol_data[token]
+            with data._lock:
+                # Startup may have populated an interval while other symbols
+                # were prepared. Never replace that history or live candle state.
+                for interval in candidate.intervals - data.intervals:
+                    data.intervals.add(interval)
+                    data.candles[interval] = candidate.candles[interval]
+                    data.last_tick_time[interval] = candidate.last_tick_time[interval]
+                    if interval in candidate.history_errors:
+                        data.history_errors[interval] = candidate.history_errors[interval]
+
+    def activate_strategy(self, strategy_id, persist=True, source=None):
+        # Consistent lock order: ingestion, evaluation, then pending queue.
+        with self._process_lock, self._evaluation_lock:
+            profile = self.strategy_store.load(strategy_id)
+            previous = self.active_strategy
+            if profile['id'] == previous['id'] and profile['version'] == previous['version']:
+                if persist:
+                    self.strategy_store.save_selection(strategy_id)
+                return self.strategy_info()
+            prepared = self._prepare_profile_history(profile)
+            if persist:
+                self.strategy_store.save_selection(strategy_id)
+            self._merge_profile_history(prepared)
+            self.active_strategy = profile
+            self.recording_profiles[profile['id']] = profile
+            self._strategy_generation += 1
+            self.bullish_conditions = profile['bullish']
+            self.bearish_conditions = profile['bearish']
+            self.alert_threshold = profile['threshold']
+            self._bind_active_state()
+            self._last_evaluation_at.clear()
+            self.strategy_error = None
+            source = source or ('dashboard activation' if persist else 'rule file reload')
+            strategy_log.info('%s: %s [%s] -> %s [%s] | threshold=%g%% | bullish=%d bearish=%d | version=%s',
+                              source, previous['name'], previous['id'], profile['name'], profile['id'],
+                              self.alert_threshold, len(self.bullish_conditions), len(self.bearish_conditions), profile['version'])
+            if self.event_callback:
+                self.event_callback({'type': 'strategy_changed', 'active': self.strategy_info(), 'source': source})
+            return self.strategy_info()
 
     def _set_connection_status(self, status, error=None):
         if status == self.connection_status and (str(error) if error else None) == self.connection_error:
@@ -421,51 +577,24 @@ class RealtimeScanner:
         # Preserve configured order while preventing duplicate subscriptions.
         self.config["symbols"] = list(dict.fromkeys(self.config.get("symbols", [])))
 
-    def load_conditions(self):
-        # Bullish
-        if os.path.exists(BULLISH_FILE):
-            mtime = os.path.getmtime(BULLISH_FILE)
-            if mtime != self.bullish_mtime:
-                self.bullish_mtime = mtime
-                self.bullish_conditions = load_conditions_from_file(BULLISH_FILE)
-                if os.getenv("VERBOSE", "false").lower() == "true":
-                    print(f"[SYSTEM] Loaded {len(self.bullish_conditions)} bullish conditions.")
-        
-        # Bearish
-        if os.path.exists(BEARISH_FILE):
-            mtime = os.path.getmtime(BEARISH_FILE)
-            if mtime != self.bearish_mtime:
-                self.bearish_mtime = mtime
-                self.bearish_conditions = load_conditions_from_file(BEARISH_FILE)
-                if os.getenv("VERBOSE", "false").lower() == "true":
-                    print(f"[SYSTEM] Loaded {len(self.bearish_conditions)} bearish conditions.")
-
     def check_reloads(self):
         now = time.time()
         if now - self.last_reload_check > self.reload_cooldown:
             self.last_reload_check = now
-            
-            # Reload environment variables to check for threshold updates
-            load_dotenv(ENV_FILE, override=True)
-            new_threshold = float(os.getenv("ALERT_THRESHOLD", "100.0"))
-            if new_threshold != self.alert_threshold:
-                if os.getenv("VERBOSE", "false").lower() == "true":
-                    print(f"[SYSTEM] Alert threshold updated from {self.alert_threshold}% to {new_threshold}%")
-                self.alert_threshold = new_threshold
-            
-            self.load_conditions()
-            
-            # Dynamically update requirements for intervals across symbols
-            required_intervals = self.get_required_intervals()
-            for sd in self.symbol_data.values():
-                sd.check_and_add_intervals(self.kite, required_intervals)
+            with self._process_lock, self._evaluation_lock:
+                self.refresh_recording_profiles()
 
     def get_required_intervals(self):
-        intervals = {'3m'}
-        for cond in self.bullish_conditions + self.bearish_conditions:
+        intervals = set(BASE_TIMEFRAMES)
+        profiles = getattr(self, 'recording_profiles', None)
+        if profiles:
+            intervals.update(profile.get('confirmation_timeframe', '5m') for profile in profiles.values())
+        conditions = ([condition for profile in profiles.values()
+                       for condition in profile['bullish'] + profile['bearish']]
+                      if profiles is not None else self.bullish_conditions + self.bearish_conditions)
+        for cond in conditions:
             intervals.add(cond.interval)
-            # If the condition references yesterday or daily closes, we require daily '1d' data
-            if cond.rule_type in ['yesterday_compare', 'multi_day_close', 'opening_or_previous_day']:
+            if cond.rule_type in ('yesterday_compare', 'multi_day_close', 'opening_or_previous_day'):
                 intervals.add('1d')
         return intervals
 
@@ -525,6 +654,7 @@ class RealtimeScanner:
             if token:
                 self.token_to_symbol[token] = sym
                 self.symbol_data[token] = SymbolData(token, sym)
+                self.symbol_data[token].history_stop = self._stop_requested
                 if os.getenv("VERBOSE", "false").lower() == "true":
                     print(f"[SYSTEM] Resolved {sym} -> Instrument Token: {token}")
             else:
@@ -560,11 +690,15 @@ class RealtimeScanner:
         sd.check_and_add_intervals(self.kite, required_intervals)
         
         # Add tick to compile OHLC candles
-        if defer_evaluation and sd.candles.get('5m'):
-            previous = sd.candles['5m'][-1]
-            if sd._get_bucket_time(tick_time, '5m') > previous['time']:
-                self._queue_evaluation(sd, previous['close'],
-                                       sd.get_latest_vwap('5m', previous['close']),
+        if defer_evaluation and latest is not None:
+            # Preserve the final pre-rollover snapshot for every profile, including
+            # boundaries (such as 09:18 on 3m) that do not coincide with 5m.
+            rolling = any(rows and sd._get_bucket_time(tick_time, iv) > rows[-1]['time']
+                          for iv, rows in sd.candles.items())
+            if rolling:
+                previous = sd.candles.get('5m', [])
+                price = previous[-1]['close'] if previous else tick['last_price']
+                self._queue_evaluation(sd, price, sd.get_latest_vwap('5m', price),
                                        getattr(sd, '_latest_exchange_time', tick_time))
         rolled_intervals = sd.add_tick(tick)
         if defer_evaluation:
@@ -606,62 +740,119 @@ class RealtimeScanner:
         if defer_evaluation:
             self._queue_evaluation(sd, ltp, vwap, tick_time)
             return
-        return self._evaluate_snapshot(sd, ltp, vwap, tick_time)
+        return self._evaluate_all_snapshot(sd, ltp, vwap, tick_time)
 
     def _queue_evaluation(self, sd, ltp, vwap, tick_time):
         snapshot = EvaluationSnapshot(sd)
         candle = snapshot.candles.get('5m', [])
         if not candle:
             return
-        key = (sd.instrument_token, candle[-1]['time'])
+        key = (sd.instrument_token, tuple((iv, rows[-1]['time'])
+                   for iv, rows in sorted(snapshot.candles.items()) if rows))
         with self._evaluation_condition:
             # Replace provisional evaluations for the same candle while
             # retaining the final snapshot of every earlier candle.
             self._pending_evaluations[key] = (
                 snapshot, ltp, vwap, tick_time,
                 tuple(self.bullish_conditions), tuple(self.bearish_conditions),
-                self.alert_threshold)
+                self.alert_threshold, getattr(self, '_strategy_generation', 0),
+                tuple(getattr(self, 'recording_profiles', {}).values()))
             self._evaluation_condition.notify()
 
-    def _evaluate_snapshot(self, sd, ltp, vwap, tick_time, rules=None):
+    def _evaluate_all_snapshot(self, sd, ltp, vwap, tick_time, profiles=None, allow_alerts=True):
+        profiles = tuple(self.recording_profiles.values()) if profiles is None and hasattr(self, 'recording_profiles') else profiles
+        if not profiles:
+            return self._evaluate_snapshot(sd, ltp, vwap, tick_time)
+        active_event = None
+        for profile in profiles:
+            active = (profile['id'] == self.active_strategy['id'] and
+                      profile['version'] == self.active_strategy['version'])
+            event = self._evaluate_snapshot(sd, ltp, vwap, tick_time, profile=profile,
+                                            alert=active and allow_alerts, publish=active)
+            if active:
+                active_event = event
+        return active_event
+
+    def _evaluate_snapshot(self, sd, ltp, vwap, tick_time, rules=None, profile=None, alert=True, publish=True):
         token = sd.instrument_token
+        profile = profile or getattr(self, 'active_strategy', None)
+        if profile and rules is None:
+            rules = (profile['bullish'], profile['bearish'], profile['threshold'])
         bull_rules, bear_rules, threshold = rules or (
             self.bullish_conditions, self.bearish_conditions, self.alert_threshold)
 
         bullish = evaluate_side("bullish", bull_rules, ltp, vwap, sd, threshold)
         bearish = evaluate_side("bearish", bear_rules, ltp, vwap, sd, threshold)
         bullish, bearish = resolve_direction(bullish, bearish)
-        event = live_event(sd, ltp, vwap, bullish, bearish, market_time=tick_time)
-        self.latest_results[token] = event
+        missing = missing_rule_timeframes(sd, bull_rules, bear_rules) if profile else []
+        confirmation = profile.get('confirmation_timeframe', '5m') if profile else '5m'
+        if sd.get_dataframe(confirmation).empty and confirmation not in missing:
+            missing.append(confirmation)
+        if missing:
+            bullish, bearish = replace(bullish, triggered=False), replace(bearish, triggered=False)
+        if profile and hasattr(self, 'strategy_states'):
+            state = self._profile_state(profile)
+            latest, priors = state['latest'], state['prior']
+        else:
+            state = None
+            latest = self.latest_results
+            if not hasattr(self, '_prior_results'):
+                self._prior_results = {}
+            priors = self._prior_results
+        event = live_event(sd, ltp, vwap, bullish, bearish, market_time=tick_time,
+                           confirmation_timeframe=confirmation)
+        event['threshold'] = threshold
+        event['data_ready'] = not missing
+        event['missing_timeframes'] = missing
+        if profile:
+            event.update(strategy_id=profile['id'], strategy_name=profile['name'], strategy_version=profile['version'])
+        event['alerts_enabled'] = bool(alert)
+        latest[token] = event
+        history = getattr(self, 'history', None)
+        if history:
+            self._record_history('evaluation', event)
+            # Archive chart series at candle boundaries; finalization refreshes
+            # the closing series. Rule evaluations retain their exact live state.
+            archive_key = (token, confirmation)
+            if event.get('candle') and self._archived_chart_candles.get(archive_key) != event['candle']['time']:
+                if self._archive_charts(sd, event):
+                    self._archived_chart_candles[archive_key] = event['candle']['time']
 
         # Freeze the last live state as the signal for the candle that just closed.
         confirmed_signal = None
-        prior = getattr(self, '_prior_results', {}).get(token)
+        prior = priors.get(token)
         if (prior and prior.get('candle') and event.get('candle') and
+                prior.get('confirmation_timeframe', '5m') == confirmation and
+                prior.get('strategy_version') == event.get('strategy_version') and
                 prior['candle']['time'] < event['candle']['time']):
-            confirmed_signal = self._confirm_once(token, prior)
+            confirmed_signal = self._confirm_once(token, prior, state)
         event["confirmed_signal"] = confirmed_signal
 
-        if not hasattr(self, "_prior_results"):
-            self._prior_results = {}
-        self._prior_results[token] = event
+        priors[token] = event
 
         for result, is_bullish, key in (
             (bullish, True, "bullish_block"),
             (bearish, False, "bearish_block"),
         ):
-            if result.triggered and (datetime.now(MARKET_TZ).replace(tzinfo=None) -
+            if alert and result.triggered and (datetime.now(MARKET_TZ).replace(tzinfo=None) -
                                      tick_time).total_seconds() <= 10:
                 passed_text = "\n     • ".join(rule.text for rule in result.rules if rule.passed)
                 condition_str = (
                     f"{result.percentage:.1f}% conditions passed "
                     f"({result.passed}/{result.total}):\n     • {passed_text}"
                 )
-                notifier.send_alert(sd.symbol, is_bullish=is_bullish,
+                if profile:
+                    key = f"{profile['id']}:{profile['version']}:{key}"
+                    cooldown = profile.get('cooldown_seconds')
+                    notifier.cooldown_seconds = cooldown if cooldown is not None else self.config.get('cooldown_seconds', 300)
+                    condition_str = f"[{profile['name']}] {condition_str}"
+                sent = notifier.send_alert(sd.symbol, is_bullish=is_bullish,
                                     condition_str=condition_str, price=ltp,
                                     cooldown_key=key)
+                if sent and history:
+                    self._record_history("alert", {**event, "alert_side": result.side})
 
-        if self.event_callback:
+        if publish and self.event_callback:
             self.event_callback(event)
         return event
 
@@ -673,42 +864,133 @@ class RealtimeScanner:
                 if not self._pending_evaluations:
                     continue
                 key = next(iter(self._pending_evaluations))
-                sd, ltp, vwap, stamp, bull, bear, threshold = self._pending_evaluations.pop(key)
+                task = self._pending_evaluations.pop(key)
+                self._evaluation_inflight = True
+                sd, ltp, vwap, stamp, bull, bear, threshold, generation = task[:8]
             try:
                 with self._evaluation_lock:
-                    self._evaluate_snapshot(sd, ltp, vwap, stamp, (bull, bear, threshold))
+                    current = generation == getattr(self, '_strategy_generation', 0)
+                    if len(task) > 8 and task[8]:
+                        self._evaluate_all_snapshot(sd, ltp, vwap, stamp, task[8], allow_alerts=current)
+                    elif current:
+                        self._evaluate_snapshot(sd, ltp, vwap, stamp, (bull, bear, threshold))
             except Exception as exc:
                 self.processing_error = str(exc)
                 print(f'[EVALUATION ERROR] {exc}')
+            finally:
+                with self._evaluation_condition:
+                    self._evaluation_inflight = False
 
-    def _confirm_once(self, token, prior):
+    def _record_history(self, kind, event):
+        try:
+            self.history.record(kind, event)
+        except Exception as exc:
+            self.history_error = str(exc)
+            print(f'[HISTORY ERROR] {exc}')
+
+    def _archive_charts(self, sd, event):
+        try:
+            day = datetime.fromtimestamp(event['candle']['time'], MARKET_TZ).date().isoformat()
+            base_charts = {tf: chart_snapshot(sd, tf, limit=600) for tf in SUPPORTED_TIMEFRAMES}
+            self.history.save_charts(sd.instrument_token, day, base_charts)
+            for profile in getattr(self, 'recording_profiles', {}).values():
+                self.history.save_strategy_charts(sd.instrument_token, day, profile['id'], {
+                    tf: profile_chart_snapshot(sd, tf, profile, limit=600, base=base_charts[tf]) for tf in SUPPORTED_TIMEFRAMES})
+            return True
+        except Exception as exc:
+            self.history_error = str(exc)
+            print(f'[HISTORY ERROR] {exc}')
+            return False
+
+    def _confirm_once(self, token, prior, state=None):
         if not prior or not prior.get('candle'):
             return None
+        finalized = state['finalized'] if state is not None else self._finalized_candles
+        confirmed = state['confirmed'] if state is not None else self.confirmed_signals
         candle_time = prior['candle']['time']
-        if candle_time <= self._finalized_candles.get(token, -1):
+        timeframe = prior.get('confirmation_timeframe', '5m')
+        key = token if timeframe == '5m' else (token, timeframe)
+        if candle_time <= finalized.get(key, -1):
             return None
-        self._finalized_candles[token] = candle_time
+        finalized[key] = candle_time
         # Retain neutral states too: absence of a signal is not missing data.
         # Store an immutable-in-practice shallow copy without nested signal history.
         signal = {key: value for key, value in prior.items() if key != 'confirmed_signal'}
-        previous = self.confirmed_signals.setdefault(token, [])
+        previous = confirmed.setdefault(token, [])
+        if getattr(self, 'history', None):
+            self._record_history('confirmed', signal)
         previous.append(signal)
-        del previous[:-200]
+        del previous[:-500]
         return signal
+
+    def _refresh_session_close(self, now):
+        """Evaluate the last ingested tick, including ticks skipped by throttling."""
+        if not hasattr(self, '_session_close_checked'):
+            self._session_close_checked = {}
+        for token, data in getattr(self, 'symbol_data', {}).items():
+            stamp = getattr(data, '_latest_exchange_time', None)
+            if stamp is None or now < stamp.replace(hour=15, minute=30, second=0, microsecond=0):
+                continue
+            if self._session_close_checked.get(token) == stamp:
+                continue
+            profiles = tuple(getattr(self, 'recording_profiles', {}).values())
+            expected_time = stamp.replace(tzinfo=MARKET_TZ).isoformat()
+            if profiles:
+                stale_profiles = tuple(profile for profile in profiles
+                    if self._profile_state(profile)['prior'].get(token, {}).get('market_time') != expected_time)
+                if not stale_profiles:
+                    self._session_close_checked[token] = stamp
+                    continue
+            else:
+                stale_profiles = None
+                if getattr(self, '_prior_results', {}).get(token, {}).get('market_time') == expected_time:
+                    self._session_close_checked[token] = stamp
+                    continue
+            snapshot = EvaluationSnapshot(data)
+            rows = snapshot.candles.get('5m', [])
+            if not rows:
+                continue
+            price = rows[-1]['close']
+            vwap = snapshot.get_latest_vwap('5m', price)
+            if stale_profiles:
+                self._evaluate_all_snapshot(snapshot, price, vwap, stamp,
+                                            profiles=stale_profiles, allow_alerts=False)
+            else:
+                self._evaluate_snapshot(snapshot, price, vwap, stamp, alert=False)
+            self._session_close_checked[token] = stamp
 
     def finalize_session(self, now=None):
         """Close the last observed candle at session end even if no new tick arrives."""
         now = market_datetime(now or datetime.now(MARKET_TZ))
-        with getattr(self, '_evaluation_lock', self._process_lock):
-            for token, prior in getattr(self, '_prior_results', {}).items():
+        self.maintain_history(now)
+        with self._process_lock, getattr(self, '_evaluation_lock', self._process_lock):
+            # Never freeze a stale result while an already-received tick or
+            # a queued/popped evaluation is still being processed.
+            if (getattr(getattr(self, '_tick_queue', None), 'unfinished_tasks', 0) or
+                    getattr(self, '_pending_evaluations', {}) or
+                    getattr(self, '_evaluation_inflight', False)):
+                return
+            self._refresh_session_close(now)
+            entries = ([(state, token, prior) for state in self.strategy_states.values()
+                        for token, prior in state['prior'].items()] if hasattr(self, 'strategy_states')
+                       else [(None, token, prior) for token, prior in getattr(self, '_prior_results', {}).items()])
+            archived = set()
+            for state, token, prior in entries:
                 if not prior.get('candle'):
                     continue
                 start = datetime.fromtimestamp(prior['candle']['time'], MARKET_TZ)
                 end = market_datetime(start).replace(hour=15, minute=30, second=0, microsecond=0)
                 if now < end:
                     continue
-                signal = self._confirm_once(token, prior)
-                if signal and self.event_callback:
+                signal = self._confirm_once(token, prior, state)
+                if signal and token not in archived and getattr(self, 'history', None):
+                    with self.symbol_data[token]._lock:
+                        self._archive_charts(self.symbol_data[token], prior)
+                    archived.add(token)
+                active = (not hasattr(self, 'active_strategy') or
+                          (prior.get('strategy_id') == self.active_strategy['id'] and
+                           prior.get('strategy_version') == self.active_strategy['version']))
+                if signal and active and self.event_callback:
                     self.event_callback({**prior, 'confirmed_signal': signal})
 
     def reconnect_if_stale(self, max_age=60.0, now=None):
@@ -807,18 +1089,43 @@ class RealtimeScanner:
             close_ticker()
         return self._ticker_closed
 
+    def maintain_history(self, now=None):
+        now = market_datetime(now or datetime.now(MARKET_TZ))
+        if getattr(self, '_retention_day', None) == now.date():
+            return
+        try:
+            if getattr(self, 'history', None):
+                self.history.prune(now)
+            if history_requests.persistent_cache:
+                history_requests.persistent_cache.prune(now)
+        except Exception:
+            strategy_log.exception('History retention cleanup failed; will retry')
+            return
+        self._retention_day = now.date()
+
     def run(self, threaded=False):
         if self._stop_requested.is_set():
             return
+        self.maintain_history()
+        try:
+            history_requests.enable_persistence(self.history.path)
+        except Exception:
+            strategy_log.exception('Persistent candle cache unavailable; using broker history')
         # 1. Resolve Instrument Tokens
         self.resolve_tokens()
 
         # 2. Pre-fetch historical candles for symbols for required intervals
         required_intervals = self.get_required_intervals()
-        for token, sd in self.symbol_data.items():
+        total = len(self.symbol_data)
+        strategy_log.info('History warmup: %d symbols, %d intervals, at most 2 requests/second; persistent cache reused, missing candles refreshed', total, len(required_intervals))
+        for index, (token, sd) in enumerate(self.symbol_data.items(), 1):
             if self._stop_requested.is_set():
                 return
             sd.check_and_add_intervals(self.kite, required_intervals)
+            if index % 25 == 0 or index == total:
+                strategy_log.info('History warmup progress: %d/%d symbols | requests=%d cache_hits=%d disk_hits=%d incremental=%d retries=%d',
+                                  index, total, history_requests.requests, history_requests.cache_hits,
+                                  history_requests.disk_hits, history_requests.incremental_requests, history_requests.retries)
 
         # 3. Setup WebSocket connection
         api_key = os.getenv("KITE_API_KEY")

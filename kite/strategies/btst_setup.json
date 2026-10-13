@@ -1,0 +1,24 @@
+{
+  "name": "BTST Daily-Hourly Confluence",
+  "description": "Seven bullish conditions from BTST SETUP.pdf plus a user-requested bearish mirror. Each side requires all seven conditions. Bearish RSI mirrors bullish RSI around 50; both directions require the same volume spike. MACD 12,26,9 was confirmed by the user. Uses current/forming daily and hourly candles.",
+  "threshold": 100,
+  "confirmation_timeframe": "5m",
+  "bullish": [
+    "1 day Close is above 1 day EMA (10)",
+    "1 day RSI (14) is greater than or equal to 40 and less than 45, or greater than or equal to 60",
+    "1-hour Close is above 1-hour EMA (10)",
+    "1-hour MACD line (12,26,9) is above MACD signal line",
+    "1-hour OBV is above its EMA (11)",
+    "1-hour Volume is greater than each of the previous 3 candles",
+    "1-hour Close is greater than Open"
+  ],
+  "bearish": [
+    "1 day Close is below 1 day EMA (10)",
+    "1 day RSI (14) is greater than 55 and less than or equal to 60, or less than or equal to 40",
+    "1-hour Close is below 1-hour EMA (10)",
+    "1-hour MACD line (12,26,9) is below MACD signal line",
+    "1-hour OBV is below its EMA (11)",
+    "1-hour Volume is greater than each of the previous 3 candles",
+    "1-hour Close is less than Open"
+  ]
+}
