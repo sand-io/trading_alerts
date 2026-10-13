@@ -69,7 +69,7 @@ class PersistentHistoryTests(unittest.TestCase):
         self.assertIsNone(cache.load(1, 'day', start, now))
 
     def test_session_retention_keeps_today_and_six_previous_days(self):
-        store = HistoryStore(self.path)
+        store = HistoryStore(self.path, retention_days=7)
         for days_ago in (0, 6, 7, 12):
             day = (self.end-timedelta(days=days_ago)).date().isoformat()
             with store.connect() as db:
@@ -81,6 +81,27 @@ class PersistentHistoryTests(unittest.TestCase):
         for table in ('events', 'charts', 'strategy_charts'):
             with store.connect() as db:
                 self.assertEqual(db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0], 2)
+
+    def test_retention_defaults_to_today_and_accepts_env_setting(self):
+        with patch.dict('os.environ', {}, clear=True):
+            store = HistoryStore(self.path)
+        self.assertEqual(store.retention_days, 1)
+        for day in ('2026-10-12', '2026-10-13'):
+            with store.connect() as db:
+                db.execute('INSERT INTO events(token,day,kind,payload) VALUES(1,?,\'evaluation\',\'{}\')', (day,))
+            store.save_charts(1, day, {'5m': {'candles': []}})
+            store.save_strategy_charts(1, day, 'default', {'5m': {'candles': []}})
+        store.prune(self.end)
+        self.assertEqual(store.days(1), ['2026-10-13'])
+        with store.connect() as db:
+            for table in ('charts', 'strategy_charts'):
+                self.assertEqual(db.execute(f'SELECT day FROM {table}').fetchall(), [('2026-10-13',)])
+        with patch.dict('os.environ', {'KITE_HISTORY_RETENTION_DAYS': '3'}):
+            self.assertEqual(HistoryStore(self.path).retention_days, 3)
+        for invalid in ('0', '-1', 'abc', '', '1.5'):
+            with self.subTest(value=invalid), patch.dict('os.environ', {'KITE_HISTORY_RETENTION_DAYS': invalid}):
+                with self.assertRaisesRegex(ValueError, 'positive integer'):
+                    HistoryStore(self.path)
 
     def test_session_end_is_stable_overnight_and_weekend(self):
         friday_close = datetime(2026, 10, 9, 15, 30)

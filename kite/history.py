@@ -1,5 +1,6 @@
 """Durable live observation archive. Never reconstructs signals from future data."""
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -10,7 +11,14 @@ TZ = ZoneInfo('Asia/Kolkata')
 
 
 class HistoryStore:
-    def __init__(self, path):
+    def __init__(self, path, retention_days=None):
+        value = os.getenv('KITE_HISTORY_RETENTION_DAYS', '1') if retention_days is None else retention_days
+        try:
+            self.retention_days = int(str(value).strip())
+        except (TypeError, ValueError):
+            raise ValueError('KITE_HISTORY_RETENTION_DAYS must be a positive integer') from None
+        if self.retention_days < 1:
+            raise ValueError('KITE_HISTORY_RETENTION_DAYS must be a positive integer')
         self.path = str(path)
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
@@ -58,10 +66,10 @@ class HistoryStore:
                        (event['instrument_token'], day, kind, candle['time'], json.dumps(payload), event.get('strategy_id', 'default'), event.get('confirmation_timeframe', '5m')))
 
     def prune(self, now=None):
-        """Keep today and the preceding six IST calendar days of saved sessions."""
+        """Keep the configured number of IST calendar days, including today."""
         now = now or datetime.now(TZ)
         day = now.astimezone(TZ).date() if now.tzinfo else now.date()
-        cutoff = (day - timedelta(days=6)).isoformat()
+        cutoff = (day - timedelta(days=self.retention_days - 1)).isoformat()
         with self.connect() as db:
             for table in ('events', 'charts', 'strategy_charts'):
                 db.execute(f'DELETE FROM {table} WHERE day < ?', (cutoff,))
