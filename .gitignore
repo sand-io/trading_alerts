@@ -1,6 +1,26 @@
+# Local secrets and virtual environments
 .env
-__pycache__/
-*.pyc
-.venv
+.env.*
+!.env.example
+.venv/
+venv/
 
+# Python-generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Runtime data and local databases
 kite/data/
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
