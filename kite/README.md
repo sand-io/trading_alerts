@@ -233,7 +233,10 @@ while a notifier alert is recorded.
 Restart the application to enable recording. Select a symbol, choose **Review
 date**, and click **Review saved day**. The chart loads saved candles and indicator
 series; the session list contains evaluations and alerts. Select an entry to see
-its saved rule results, or click a 5m candle for its last saved evaluation. BULL/BEAR
+its saved rule results, or click a 5m candle to update both condition panels.
+Clicking prefers the confirmed candle state, falling back to its last saved
+evaluation. Candles without recordings show an explicit empty state. The selected
+result stays visible while moving the mouse or leaving the chart. BULL/BEAR
 marks remain on the 5m chart. **Return to live** resumes live display. Recording
 continues for all configured symbols while reviewing a date.
 
