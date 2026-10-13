@@ -5,6 +5,11 @@
 .venv/
 venv/
 
+# Local workspace and agent tooling
+/.agents/
+/.aws/
+/.codex/
+
 # Python-generated files
 __pycache__/
 *.py[cod]
