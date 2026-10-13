@@ -4,6 +4,8 @@ from copy import deepcopy
 import logging
 import threading
 import time
+from datetime import datetime
+from candle_cache import CandleCache, TZ, history_end, wall_time
 
 
 class HistoryCancelled(RuntimeError):
@@ -23,12 +25,19 @@ class HistoricalRequests:
         self.next_request_at = 0.
         self.cache = OrderedDict()
         self.requests = self.cache_hits = self.retries = self.rate_limits = 0
+        self.persistent_cache = None
+        self.disk_hits = self.incremental_requests = 0
+
+    def enable_persistence(self, path):
+        self.persistent_cache = CandleCache(path)
+        self.persistent_cache.prune(datetime.now(TZ))
 
     def stats(self):
         # Do not block health requests behind an HTTP call or a retry delay.
         return {'requests': self.requests, 'cache_hits': self.cache_hits,
                 'retries': self.retries, 'rate_limits': self.rate_limits,
-                'max_requests_per_second': 1 / self.spacing}
+                'max_requests_per_second': 1 / self.spacing,
+                'disk_hits': self.disk_hits, 'incremental_requests': self.incremental_requests}
 
     @staticmethod
     def _limited(exc):
@@ -59,6 +68,24 @@ class HistoricalRequests:
                 self.cache.move_to_end(key)
                 self.cache_hits += 1
                 return deepcopy(cached[1])
+            original_start = start
+            existing = None
+            now_wall = wall_time(datetime.now(TZ))
+            if self.persistent_cache:
+                start, end = wall_time(start), history_end(end)
+                original_start = start
+                try:
+                    existing = self.persistent_cache.load(token, interval, start, now_wall)
+                except Exception:
+                    self.log.exception('Candle cache read failed; fetching broker history')
+                if existing:
+                    covered_until, previous = existing
+                    if covered_until >= end:
+                        self.disk_hits += 1
+                        return deepcopy([r for r in previous if start <= wall_time(r['date']) <= end])
+                    if previous:
+                        start = max(start, wall_time(previous[-1]['date']))
+                        self.incremental_requests += 1
             for attempt in range(self.attempts):
                 self._wait(max(0, self.next_request_at - self.clock()), stop)
                 self.next_request_at = self.clock() + self.spacing
@@ -78,6 +105,15 @@ class HistoricalRequests:
                     self.log.warning('History rate-limited for token=%s interval=%s; retry %d/%d after %ds',
                                      token, interval, attempt + 1, self.attempts - 1, delay)
                     continue
+                if self.persistent_cache:
+                    merged = {wall_time(r['date']): r for r in (existing[1] if existing else [])}
+                    merged.update({wall_time(r['date']): r for r in records})
+                    records = [merged[t] for t in sorted(merged) if original_start <= t <= end]
+                    if records:
+                        try:
+                            self.persistent_cache.save(token, interval, original_start, end, records, now_wall)
+                        except Exception:
+                            self.log.exception('Candle cache write failed; continuing with broker history')
                 # Do not cache failures or empty responses; real missing data can
                 # recover on a later explicit load. Keep responses private.
                 if records and self.cache_size:

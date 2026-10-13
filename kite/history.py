@@ -2,7 +2,7 @@
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -56,6 +56,15 @@ class HistoryStore:
         with self.connect() as db:
             db.execute('INSERT OR IGNORE INTO events(token,day,kind,candle,payload,strategy,confirmation_timeframe) VALUES(?,?,?,?,?,?,?)',
                        (event['instrument_token'], day, kind, candle['time'], json.dumps(payload), event.get('strategy_id', 'default'), event.get('confirmation_timeframe', '5m')))
+
+    def prune(self, now=None):
+        """Keep today and the preceding six IST calendar days of saved sessions."""
+        now = now or datetime.now(TZ)
+        day = now.astimezone(TZ).date() if now.tzinfo else now.date()
+        cutoff = (day - timedelta(days=6)).isoformat()
+        with self.connect() as db:
+            for table in ('events', 'charts', 'strategy_charts'):
+                db.execute(f'DELETE FROM {table} WHERE day < ?', (cutoff,))
 
     def save_charts(self, token, day, charts):
         with self.connect() as db:

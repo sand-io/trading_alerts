@@ -430,3 +430,26 @@ Previously saved records without interval metadata remain `5m`; changing a
 strategy does not reinterpret old history. SQLite migrates the existing archive
 automatically and separates confirmations on different intervals even when they
 share a candle timestamp. No API credentials or additional dependencies are needed.
+
+### Startup cache and seven-day retention
+
+Broker candle history is cached in the `candle_cache` table in the same SQLite
+file as session recordings (`KITE_HISTORY_DB`, default `data/history.sqlite3`).
+Restarts reuse covered history and refresh from the last cached candle to replace
+its provisional OHLC and append missing candles. Overnight and weekend requests
+are capped at the most recent regular weekday session close. Holidays are left
+to the broker response. A failed refresh does not mark stale history as fresh.
+Cache problems fall back to broker downloads and are logged.
+
+Saved sessions are kept for today and the preceding six IST calendar days.
+Cleanup runs at startup and once per day while running. Candle cache entries expire seven days
+after their last successful broker refresh; reads do not extend expiry. Valid
+entries retain the required indicator lookback (including older daily candles),
+so EMA/RSI calculations are not truncated to seven candles. This is a retention
+policy for session dates and cache lifetime, not a seven-day indicator window.
+
+The first startup with an empty/expired cache still downloads full history.
+Missing history still respects the shared two-request-per-second limit; an
+intraday restart can still need one incremental request per symbol/interval.
+The live feed starts after warmup completes. Progress logs and `/api/health`
+include `disk_hits` and `incremental_requests` (logged as `incremental`).

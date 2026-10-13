@@ -962,6 +962,7 @@ class RealtimeScanner:
     def finalize_session(self, now=None):
         """Close the last observed candle at session end even if no new tick arrives."""
         now = market_datetime(now or datetime.now(MARKET_TZ))
+        self.maintain_history(now)
         with self._process_lock, getattr(self, '_evaluation_lock', self._process_lock):
             # Never freeze a stale result while an already-received tick or
             # a queued/popped evaluation is still being processed.
@@ -1088,23 +1089,43 @@ class RealtimeScanner:
             close_ticker()
         return self._ticker_closed
 
+    def maintain_history(self, now=None):
+        now = market_datetime(now or datetime.now(MARKET_TZ))
+        if getattr(self, '_retention_day', None) == now.date():
+            return
+        try:
+            if getattr(self, 'history', None):
+                self.history.prune(now)
+            if history_requests.persistent_cache:
+                history_requests.persistent_cache.prune(now)
+        except Exception:
+            strategy_log.exception('History retention cleanup failed; will retry')
+            return
+        self._retention_day = now.date()
+
     def run(self, threaded=False):
         if self._stop_requested.is_set():
             return
+        self.maintain_history()
+        try:
+            history_requests.enable_persistence(self.history.path)
+        except Exception:
+            strategy_log.exception('Persistent candle cache unavailable; using broker history')
         # 1. Resolve Instrument Tokens
         self.resolve_tokens()
 
         # 2. Pre-fetch historical candles for symbols for required intervals
         required_intervals = self.get_required_intervals()
         total = len(self.symbol_data)
-        strategy_log.info('History warmup: %d symbols, %d intervals, at most 2 requests/second; existing intervals are reused', total, len(required_intervals))
+        strategy_log.info('History warmup: %d symbols, %d intervals, at most 2 requests/second; persistent cache reused, missing candles refreshed', total, len(required_intervals))
         for index, (token, sd) in enumerate(self.symbol_data.items(), 1):
             if self._stop_requested.is_set():
                 return
             sd.check_and_add_intervals(self.kite, required_intervals)
             if index % 25 == 0 or index == total:
-                strategy_log.info('History warmup progress: %d/%d symbols | requests=%d cache_hits=%d retries=%d',
-                                  index, total, history_requests.requests, history_requests.cache_hits, history_requests.retries)
+                strategy_log.info('History warmup progress: %d/%d symbols | requests=%d cache_hits=%d disk_hits=%d incremental=%d retries=%d',
+                                  index, total, history_requests.requests, history_requests.cache_hits,
+                                  history_requests.disk_hits, history_requests.incremental_requests, history_requests.retries)
 
         # 3. Setup WebSocket connection
         api_key = os.getenv("KITE_API_KEY")
