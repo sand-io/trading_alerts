@@ -458,3 +458,16 @@ Missing history still respects the shared two-request-per-second limit; an
 intraday restart can still need one incremental request per symbol/interval.
 The live feed starts after warmup completes. Progress logs and `/api/health`
 include `disk_hits` and `incremental_requests` (logged as `incremental`).
+
+### Alert evaluation latency
+
+Live evaluation prepares each timeframe and technical indicator once per symbol
+snapshot, then reuses it across mirrored bullish/bearish rules and recorded
+strategies. The active strategy is evaluated first. Large chart snapshots are
+coalesced by symbol and written by a separate worker, so chart persistence cannot
+delay the alert decision. `/api/health` reports `evaluation_lag_seconds`,
+`pending_evaluations`, and `pending_chart_archives` for operational checks.
+
+Alerts accept evaluations up to 30 seconds after their exchange timestamp by
+default. Set `alert_max_age_seconds` in `kite/config.json` to change this guard.
+Older queued results remain recorded for review but never generate delayed alerts.

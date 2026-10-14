@@ -2,9 +2,11 @@ import threading
 import time
 import unittest
 from datetime import datetime, timedelta
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
-from scanner import RealtimeScanner, SymbolData
+from conditions import Condition
+from scanner import EvaluationSnapshot, RealtimeScanner, SymbolData
+from strategy_runtime import evaluate_side
 
 
 class TestProcessingPipeline(unittest.TestCase):
@@ -62,6 +64,21 @@ class TestProcessingPipeline(unittest.TestCase):
         self.assertEqual(tasks[0][0].candles['5m'][-1]['close'], 110)
         self.assertEqual(tasks[1][0].candles['5m'][-1]['close'], 120)
         self.assertEqual(tasks[0][0].get_dataframe('5m').iloc[-1]['close'], 110)
+
+    def test_snapshot_reuses_live_frame_and_indicator_for_mirrored_rules(self):
+        data = SymbolData(1, 'NSE:TEST')
+        data.candles['5m'] = [dict(
+            time=datetime(2026, 10, 8, 9, 15) + timedelta(minutes=5*i),
+            open=100+i, high=102+i, low=99+i, close=101+i, volume=100+i, vwap=100)
+            for i in range(50)]
+        snapshot = EvaluationSnapshot(data)
+        bullish = [Condition.parse('5-minute ADX (14) is greater than 22 and rising')]
+        bearish = [Condition.parse('5-minute ADX (14) is greater than 22 and rising')]
+        with patch('conditions.calculate_adx', wraps=__import__('conditions').calculate_adx) as adx:
+            evaluate_side('bullish', bullish, 151, 120, snapshot, 90)
+            evaluate_side('bearish', bearish, 151, 120, snapshot, 90)
+        self.assertEqual(adx.call_count, 1)
+        self.assertEqual(len(snapshot._evaluation_frames), 1)
 
 
 if __name__ == '__main__':

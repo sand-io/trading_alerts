@@ -63,6 +63,31 @@ class AllStrategyRecordingTests(unittest.TestCase):
         self.scanner.event_callback.assert_called_once()
         self.assertEqual(self.scanner.event_callback.call_args.args[0]['strategy_id'], 'default')
 
+    def test_active_alert_precedes_coalesced_chart_archive(self):
+        self.scanner._archive_worker = Mock()
+        self.scanner._archive_worker.is_alive.return_value = True
+        with patch('scanner.notifier.send_alert', return_value=True) as notify, \
+             patch.object(self.scanner, '_archive_charts') as archive:
+            self.evaluate()
+        notify.assert_called_once()
+        archive.assert_not_called()
+        self.assertEqual(list(self.scanner._pending_archives), [1])
+        self.assertEqual(len(self.scanner._pending_archives[1][2]), 1)
+        # Another matching evaluation in the same candle does not add work.
+        with patch('scanner.notifier.send_alert', return_value=False):
+            self.evaluate()
+        self.assertEqual(list(self.scanner._pending_archives), [1])
+
+    def test_selected_profile_is_evaluated_first(self):
+        self.scanner.activate_strategy('second')
+        order = []
+        original = self.scanner._evaluate_snapshot
+        with patch('scanner.notifier.send_alert', return_value=False), \
+             patch.object(self.scanner, '_evaluate_snapshot', side_effect=lambda *a, **kw:
+                          order.append(kw['profile']['id']) or original(*a, **kw)):
+            self.evaluate()
+        self.assertEqual(order, ['second', 'default'])
+
     def test_switch_preserves_both_strategies_candle_confirmations_and_reopens_history(self):
         with patch('scanner.notifier.send_alert', return_value=True):
             self.evaluate()
