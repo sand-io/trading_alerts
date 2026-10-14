@@ -465,8 +465,14 @@ Live evaluation prepares each timeframe and technical indicator once per symbol
 snapshot, then reuses it across mirrored bullish/bearish rules and recorded
 strategies. The active strategy is evaluated first. Large chart snapshots are
 coalesced by symbol and written by a separate worker, so chart persistence cannot
-delay the alert decision. `/api/health` reports `evaluation_lag_seconds`,
-`pending_evaluations`, and `pending_chart_archives` for operational checks.
+block the alert decision on disk I/O. Event rows are written in ordered batches
+by a separate recording worker; desktop delivery also runs in the background.
+`/api/health` reports `evaluation_lag_seconds`, `pending_evaluations`,
+`pending_history_events`, and `pending_chart_archives` for operational checks.
+Queued checkpoints capture their candles and strategy versions when scheduled;
+later ticks and strategy edits cannot change them. Shutdown drains received ticks
+and evaluations before stopping recording workers, with bounded waits and an
+explicit warning if work remains. An abrupt process kill can lose queued work.
 
 Alerts accept evaluations up to 30 seconds after their exchange timestamp by
 default. Set `alert_max_age_seconds` in `kite/config.json` to change this guard.

@@ -1,6 +1,7 @@
 import threading
 import time
 import unittest
+import queue
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
 
@@ -64,6 +65,20 @@ class TestProcessingPipeline(unittest.TestCase):
         self.assertEqual(tasks[0][0].candles['5m'][-1]['close'], 110)
         self.assertEqual(tasks[1][0].candles['5m'][-1]['close'], 120)
         self.assertEqual(tasks[0][0].get_dataframe('5m').iloc[-1]['close'], 110)
+
+    def test_shutdown_drains_received_tick_batches(self):
+        scanner = self.scanner()
+        scanner._stop_requested = threading.Event()
+        scanner._process_lock = threading.RLock()
+        scanner._tick_queue = queue.Queue()
+        scanner._process_tick_locked = Mock()
+        scanner._tick_queue.put([{'instrument_token': 1}, {'instrument_token': 2}])
+        scanner._tick_queue.put([{'instrument_token': 3}])
+        scanner._tick_queue.put(None)
+        scanner._stop_requested.set()
+        scanner._process_tick_queue()
+        self.assertEqual(scanner._process_tick_locked.call_count, 3)
+        self.assertEqual(scanner._tick_queue.unfinished_tasks, 0)
 
     def test_snapshot_reuses_live_frame_and_indicator_for_mirrored_rules(self):
         data = SymbolData(1, 'NSE:TEST')

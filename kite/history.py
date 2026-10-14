@@ -56,14 +56,22 @@ class HistoryStore:
             db.close()
 
     def record(self, kind, event):
-        candle = event.get('candle')
-        if not candle:
+        self.record_many([(kind, event)])
+
+    def record_many(self, events):
+        rows = []
+        for kind, event in events:
+            candle = event.get('candle')
+            if not candle:
+                continue
+            day = datetime.fromtimestamp(candle['time'], TZ).date().isoformat()
+            payload = {k: v for k, v in event.items() if k != 'confirmed_signal'}
+            rows.append((event['instrument_token'], day, kind, candle['time'], json.dumps(payload),
+                         event.get('strategy_id', 'default'), event.get('confirmation_timeframe', '5m')))
+        if not rows:
             return
-        day = datetime.fromtimestamp(candle['time'], TZ).date().isoformat()
-        payload = {k: v for k, v in event.items() if k != 'confirmed_signal'}
         with self.connect() as db:
-            db.execute('INSERT OR IGNORE INTO events(token,day,kind,candle,payload,strategy,confirmation_timeframe) VALUES(?,?,?,?,?,?,?)',
-                       (event['instrument_token'], day, kind, candle['time'], json.dumps(payload), event.get('strategy_id', 'default'), event.get('confirmation_timeframe', '5m')))
+            db.executemany('INSERT OR IGNORE INTO events(token,day,kind,candle,payload,strategy,confirmation_timeframe) VALUES(?,?,?,?,?,?,?)', rows)
 
     def prune(self, now=None):
         """Keep the configured number of IST calendar days, including today."""
@@ -75,9 +83,9 @@ class HistoryStore:
                 db.execute(f'DELETE FROM {table} WHERE day < ?', (cutoff,))
 
     def save_charts(self, token, day, charts):
+        rows = [(token, day, tf, json.dumps(chart)) for tf, chart in charts.items()]
         with self.connect() as db:
-            db.executemany('INSERT OR REPLACE INTO charts VALUES(?,?,?,?)',
-                           [(token, day, tf, json.dumps(chart)) for tf, chart in charts.items()])
+            db.executemany('INSERT OR REPLACE INTO charts VALUES(?,?,?,?)', rows)
 
     def days(self, token):
         with self.connect() as db:
@@ -100,9 +108,9 @@ class HistoryStore:
         return json.loads(row[0]) if row else None
 
     def save_strategy_charts(self, token, day, strategy_id, charts):
+        rows = [(token, day, tf, strategy_id, json.dumps(chart)) for tf, chart in charts.items()]
         with self.connect() as db:
-            db.executemany('INSERT OR REPLACE INTO strategy_charts VALUES(?,?,?,?,?)',
-                           [(token, day, tf, strategy_id, json.dumps(chart)) for tf, chart in charts.items()])
+            db.executemany('INSERT OR REPLACE INTO strategy_charts VALUES(?,?,?,?,?)', rows)
 
     def strategy_chart(self, token, day, timeframe, strategy_id):
         with self.connect() as db:
