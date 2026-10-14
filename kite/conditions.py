@@ -500,19 +500,26 @@ class Condition:
                 if op == '==': return abs(val_left - val_right) < 1e-5
             return False
 
-        # Make copy and update the last row with real-time live price (LTP) and tick VWAP
-        df = df.copy()
-        latest_idx = df.index[-1]
-        df.loc[latest_idx, 'close'] = ltp
-        if ltp > df.loc[latest_idx, 'high']:
-            df.loc[latest_idx, 'high'] = ltp
-        if ltp < df.loc[latest_idx, 'low']:
-            df.loc[latest_idx, 'low'] = ltp
-        df.loc[latest_idx, 'vwap'] = vwap
+        # A queued snapshot shares this prepared frame and its indicators across
+        # bullish/bearish rules. Direct callers retain the same isolated copy.
+        prepare = getattr(symbol_data, 'get_evaluation_dataframe', None)
+        if prepare:
+            df = prepare(self.interval, ltp, vwap)
+        else:
+            df = df.copy()
+            latest_idx = df.index[-1]
+            df.loc[latest_idx, 'close'] = ltp
+            df.loc[latest_idx, 'high'] = max(df.loc[latest_idx, 'high'], ltp)
+            df.loc[latest_idx, 'low'] = min(df.loc[latest_idx, 'low'], ltp)
+            df.loc[latest_idx, 'vwap'] = vwap
+
+        cached = getattr(symbol_data, 'cached_indicator', None)
+        def indicator(key, factory):
+            return cached((self.interval, ltp, *key), factory) if cached else factory()
 
         # Route to logic
         if self.rule_type == 'rsi_bands':
-            values = calculate_rsi(df['close'], self.params['period'])
+            values = indicator(('rsi', self.params['period']), lambda: calculate_rsi(df['close'], self.params['period']))
             if values.empty or not np.isfinite(values.iloc[-1]):
                 return False
             value = values.iloc[-1]
@@ -520,7 +527,7 @@ class Condition:
                     value >= self.params['breakout'])
 
         elif self.rule_type == 'rsi_bearish_bands':
-            values = calculate_rsi(df['close'], self.params['period'])
+            values = indicator(('rsi', self.params['period']), lambda: calculate_rsi(df['close'], self.params['period']))
             if values.empty or not np.isfinite(values.iloc[-1]):
                 return False
             value = values.iloc[-1]
@@ -545,7 +552,7 @@ class Condition:
             op = self.params['op']
             val = self.params['value']
             
-            adx_series = calculate_adx(df, period)
+            adx_series = indicator(('adx', period), lambda: calculate_adx(df, period))
             if len(adx_series) < 2 or pd.isna(adx_series.iloc[-1]):
                 return False
             threshold_passed = adx_series.iloc[-1] > val if op == '>' else adx_series.iloc[-1] < val
@@ -592,8 +599,8 @@ class Condition:
             period = self.params['ema_period']
             if len(df) < period:
                 return False
-            obv = calculate_obv(df)
-            obv_ema = calculate_ema(obv, period)
+            obv = indicator(('obv',), lambda: calculate_obv(df))
+            obv_ema = indicator(('obv_ema', period), lambda: calculate_ema(obv, period))
             if pd.isna(obv.iloc[-1]) or pd.isna(obv_ema.iloc[-1]):
                 return False
             return obv.iloc[-1] > obv_ema.iloc[-1] if self.params['op'] == '>' else obv.iloc[-1] < obv_ema.iloc[-1]
@@ -605,7 +612,7 @@ class Condition:
                 return False
             recent = df.iloc[-candles:]
             price_range = recent['high'].max() - recent['low'].min()
-            atr = calculate_atr(df, atr_period).iloc[-1]
+            atr = indicator(('atr', atr_period), lambda: calculate_atr(df, atr_period)).iloc[-1]
             if pd.isna(atr):
                 return False
             limit = self.params['multiplier'] * atr
@@ -667,7 +674,9 @@ class Condition:
             op = self.params['op']
             d_smooth = self.params['d_smooth']
             
-            k_series, d_series = calculate_stoch(df, k_period, k_smooth, d_smooth)
+            k_series, d_series = indicator(
+                ('stoch', k_period, k_smooth, d_smooth),
+                lambda: calculate_stoch(df, k_period, k_smooth, d_smooth))
             if k_series.empty or pd.isna(k_series.iloc[-1]) or pd.isna(d_series.iloc[-1]):
                 return False
                 
@@ -680,7 +689,7 @@ class Condition:
             if len(df) < ema_period + 1:
                 return False
                 
-            ema_series = calculate_ema(df['close'], ema_period)
+            ema_series = indicator(('ema', ema_period), lambda: calculate_ema(df['close'], ema_period))
             val_prev = df['close'].iloc[-2]
             ema_prev = ema_series.iloc[-2]
             
@@ -693,7 +702,7 @@ class Condition:
             if len(df) < ema_period:
                 return False
                 
-            ema_series = calculate_ema(df['close'], ema_period)
+            ema_series = indicator(('ema', ema_period), lambda: calculate_ema(df['close'], ema_period))
             return ltp > ema_series.iloc[-1] if op == '>' else ltp < ema_series.iloc[-1]
 
         elif self.rule_type == 'rsi':
@@ -701,7 +710,7 @@ class Condition:
             op = self.params['op']
             val = self.params['value']
             
-            rsi_series = calculate_rsi(df['close'], period)
+            rsi_series = indicator(('rsi', period), lambda: calculate_rsi(df['close'], period))
             if rsi_series.empty or pd.isna(rsi_series.iloc[-1]):
                 return False
             return rsi_series.iloc[-1] > val if op == '>' else rsi_series.iloc[-1] < val
@@ -715,8 +724,8 @@ class Condition:
             if len(df) < max_ema:
                 return False
                 
-            ema1_series = calculate_ema(df['close'], ema1)
-            ema2_series = calculate_ema(df['close'], ema2)
+            ema1_series = indicator(('ema', ema1), lambda: calculate_ema(df['close'], ema1))
+            ema2_series = indicator(('ema', ema2), lambda: calculate_ema(df['close'], ema2))
             
             return ema1_series.iloc[-1] > ema2_series.iloc[-1] if op == '>' else ema1_series.iloc[-1] < ema2_series.iloc[-1]
 
@@ -726,7 +735,8 @@ class Condition:
             signal = self.params['signal']
             op = self.params['op']
             
-            macd_series, signal_series = calculate_macd(df, fast, slow, signal)
+            macd_series, signal_series = indicator(
+                ('macd', fast, slow, signal), lambda: calculate_macd(df, fast, slow, signal))
             if macd_series.empty or pd.isna(macd_series.iloc[-1]) or pd.isna(signal_series.iloc[-1]):
                 return False
             return macd_series.iloc[-1] > signal_series.iloc[-1] if op == '>' else macd_series.iloc[-1] < signal_series.iloc[-1]
@@ -736,13 +746,13 @@ class Condition:
             ema2 = self.params['ema2']
             op = self.params['op']
             
-            ha_df = calculate_heikin_ashi(df)
+            ha_df = indicator(('heikin_ashi',), lambda: calculate_heikin_ashi(df))
             max_ema = max(ema1, ema2)
             if len(ha_df) < max_ema:
                 return False
                 
-            ema1_series = calculate_ema(ha_df['close'], ema1)
-            ema2_series = calculate_ema(ha_df['close'], ema2)
+            ema1_series = indicator(('ha_ema', ema1), lambda: calculate_ema(ha_df['close'], ema1))
+            ema2_series = indicator(('ha_ema', ema2), lambda: calculate_ema(ha_df['close'], ema2))
             
             return ema1_series.iloc[-1] > ema2_series.iloc[-1] if op == '>' else ema1_series.iloc[-1] < ema2_series.iloc[-1]
 
@@ -807,7 +817,7 @@ class Condition:
                 if len(df) < period:
                     return False
                 if right.startswith("EMA"):
-                    val_right = calculate_ema(df['close'], period).iloc[-1]
+                    val_right = indicator(('ema', period), lambda: calculate_ema(df['close'], period)).iloc[-1]
                 else:
                     val_right = df['close'].rolling(window=period).mean().iloc[-1]
             else:

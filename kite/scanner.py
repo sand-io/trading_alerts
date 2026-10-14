@@ -356,11 +356,33 @@ class EvaluationSnapshot(SymbolData):
             self.candles = {iv: [dict(row) for row in rows]
                             for iv, rows in source.candles.items()}
         self._frames = {}
+        self._evaluation_frames = {}
+        self._indicator_values = {}
 
     def get_dataframe(self, interval):
         if interval not in self._frames:
             self._frames[interval] = super().get_dataframe(interval)
         return self._frames[interval]
+
+    def get_evaluation_dataframe(self, interval, ltp, vwap):
+        """Prepare each live timeframe once for every rule in this snapshot."""
+        vwap_key = None if vwap is None or pd.isna(vwap) else float(vwap)
+        key = (interval, float(ltp), vwap_key)
+        if key not in self._evaluation_frames:
+            frame = self.get_dataframe(interval).copy()
+            if not frame.empty:
+                latest = frame.index[-1]
+                frame.loc[latest, 'close'] = ltp
+                frame.loc[latest, 'high'] = max(frame.loc[latest, 'high'], ltp)
+                frame.loc[latest, 'low'] = min(frame.loc[latest, 'low'], ltp)
+                frame.loc[latest, 'vwap'] = vwap
+            self._evaluation_frames[key] = frame
+        return self._evaluation_frames[key]
+
+    def cached_indicator(self, key, factory):
+        if key not in self._indicator_values:
+            self._indicator_values[key] = factory()
+        return self._indicator_values[key]
 
 
 class RealtimeScanner:
@@ -406,6 +428,10 @@ class RealtimeScanner:
         self._evaluation_lock = threading.RLock()
         self._pending_evaluations = {}
         self._evaluation_worker = None
+        self._archive_condition = threading.Condition()
+        self._pending_archives = {}
+        self._archive_worker = None
+        self._archive_inflight = False
         self._last_chart_publish = {}
         self._last_processed_received = None
         self.latest_market_results = {}
@@ -763,6 +789,11 @@ class RealtimeScanner:
         profiles = tuple(self.recording_profiles.values()) if profiles is None and hasattr(self, 'recording_profiles') else profiles
         if not profiles:
             return self._evaluate_snapshot(sd, ltp, vwap, tick_time)
+        # The selected strategy owns user-facing alerts, so evaluate it before
+        # profiles that are recorded only for later review.
+        profiles = tuple(sorted(profiles, key=lambda profile: not (
+            profile['id'] == self.active_strategy['id'] and
+            profile['version'] == self.active_strategy['version'])))
         active_event = None
         for profile in profiles:
             active = (profile['id'] == self.active_strategy['id'] and
@@ -809,33 +840,18 @@ class RealtimeScanner:
         event['alerts_enabled'] = bool(alert)
         latest[token] = event
         history = getattr(self, 'history', None)
-        if history:
-            self._record_history('evaluation', event)
-            # Archive chart series at candle boundaries; finalization refreshes
-            # the closing series. Rule evaluations retain their exact live state.
-            archive_key = (token, confirmation)
-            if event.get('candle') and self._archived_chart_candles.get(archive_key) != event['candle']['time']:
-                if self._archive_charts(sd, event):
-                    self._archived_chart_candles[archive_key] = event['candle']['time']
 
-        # Freeze the last live state as the signal for the candle that just closed.
-        confirmed_signal = None
-        prior = priors.get(token)
-        if (prior and prior.get('candle') and event.get('candle') and
-                prior.get('confirmation_timeframe', '5m') == confirmation and
-                prior.get('strategy_version') == event.get('strategy_version') and
-                prior['candle']['time'] < event['candle']['time']):
-            confirmed_signal = self._confirm_once(token, prior, state)
-        event["confirmed_signal"] = confirmed_signal
-
-        priors[token] = event
-
+        # Notify before any SQLite/chart checkpoint work. With hundreds of
+        # symbols, persistence latency must never make a fresh match go stale.
+        evaluation_lag = max(0., (datetime.now(MARKET_TZ).replace(tzinfo=None) - tick_time).total_seconds())
+        if alert:
+            self._last_evaluation_lag_seconds = evaluation_lag
+        max_alert_age = float(getattr(self, 'config', {}).get('alert_max_age_seconds', 30))
         for result, is_bullish, key in (
             (bullish, True, "bullish_block"),
             (bearish, False, "bearish_block"),
         ):
-            if alert and result.triggered and (datetime.now(MARKET_TZ).replace(tzinfo=None) -
-                                     tick_time).total_seconds() <= 10:
+            if alert and result.triggered and evaluation_lag <= max_alert_age:
                 passed_text = "\n     • ".join(rule.text for rule in result.rules if rule.passed)
                 condition_str = (
                     f"{result.percentage:.1f}% conditions passed "
@@ -851,6 +867,26 @@ class RealtimeScanner:
                                     cooldown_key=key)
                 if sent and history:
                     self._record_history("alert", {**event, "alert_side": result.side})
+
+        if history:
+            self._record_history('evaluation', event)
+            # Chart building and large JSON writes are coalesced by symbol on a
+            # dedicated worker. Event rows remain exact and ordered here.
+            archive_key = (token, confirmation)
+            if event.get('candle') and self._archived_chart_candles.get(archive_key) != event['candle']['time']:
+                self._schedule_chart_archive(sd, event, archive_key)
+
+        # Freeze the last live state as the signal for the candle that just closed.
+        confirmed_signal = None
+        prior = priors.get(token)
+        if (prior and prior.get('candle') and event.get('candle') and
+                prior.get('confirmation_timeframe', '5m') == confirmation and
+                prior.get('strategy_version') == event.get('strategy_version') and
+                prior['candle']['time'] < event['candle']['time']):
+            confirmed_signal = self._confirm_once(token, prior, state)
+        event["confirmed_signal"] = confirmed_signal
+
+        priors[token] = event
 
         if publish and self.event_callback:
             self.event_callback(event)
@@ -901,6 +937,45 @@ class RealtimeScanner:
             self.history_error = str(exc)
             print(f'[HISTORY ERROR] {exc}')
             return False
+
+    def _schedule_chart_archive(self, sd, event, archive_key):
+        worker = getattr(self, '_archive_worker', None)
+        if worker is None or not worker.is_alive():
+            if self._archive_charts(sd, event):
+                self._archived_chart_candles[archive_key] = event['candle']['time']
+            return
+        with self._archive_condition:
+            pending = self._pending_archives.get(sd.instrument_token)
+            keys = set(pending[2]) if pending else set()
+            keys.add(archive_key)
+            # Keep the existing live SymbolData reference instead of retaining
+            # hundreds of full EvaluationSnapshot copies while disk work drains.
+            source = getattr(self, 'symbol_data', {}).get(sd.instrument_token, sd)
+            self._pending_archives[sd.instrument_token] = (source, dict(event), keys)
+            # Mark the candle when queued so repeated evaluations coalesce.
+            self._archived_chart_candles[archive_key] = event['candle']['time']
+            self._archive_condition.notify()
+
+    def _process_chart_archives(self):
+        while True:
+            with self._archive_condition:
+                self._archive_condition.wait_for(
+                    lambda: self._pending_archives or self._stop_requested.is_set(), timeout=.25)
+                if not self._pending_archives:
+                    if self._stop_requested.is_set():
+                        return
+                    continue
+                token = next(iter(self._pending_archives))
+                sd, event, keys = self._pending_archives.pop(token)
+                self._archive_inflight = True
+            saved = self._archive_charts(sd, event)
+            with self._archive_condition:
+                if not saved:
+                    for key in keys:
+                        if self._archived_chart_candles.get(key) == event['candle']['time']:
+                            self._archived_chart_candles.pop(key, None)
+                self._archive_inflight = False
+                self._archive_condition.notify_all()
 
     def _confirm_once(self, token, prior, state=None):
         if not prior or not prior.get('candle'):
@@ -1065,6 +1140,10 @@ class RealtimeScanner:
         if condition is not None:
             with condition:
                 condition.notify_all()
+        archive_condition = getattr(self, '_archive_condition', None)
+        if archive_condition is not None:
+            with archive_condition:
+                archive_condition.notify_all()
         try:
             self._tick_queue.put_nowait(None)
         except (AttributeError, queue.Full):
@@ -1140,6 +1219,9 @@ class RealtimeScanner:
         self._evaluation_worker = threading.Thread(
             target=self._process_evaluations, name='kite-evaluation-worker', daemon=True)
         self._evaluation_worker.start()
+        self._archive_worker = threading.Thread(
+            target=self._process_chart_archives, name='kite-chart-archive-worker', daemon=True)
+        self._archive_worker.start()
         self.kws = KiteTicker(api_key, access_token)
         tokens = list(self.token_to_symbol.keys())
         self._set_connection_status("connecting")
