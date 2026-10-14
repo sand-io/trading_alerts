@@ -432,6 +432,9 @@ class RealtimeScanner:
         self._pending_archives = {}
         self._archive_worker = None
         self._archive_inflight = False
+        self._history_queue = queue.Queue(maxsize=10000)
+        self._history_worker = None
+        self._persistence_stopping = threading.Event()
         self._last_chart_publish = {}
         self._last_processed_received = None
         self.latest_market_results = {}
@@ -788,7 +791,7 @@ class RealtimeScanner:
     def _evaluate_all_snapshot(self, sd, ltp, vwap, tick_time, profiles=None, allow_alerts=True):
         profiles = tuple(self.recording_profiles.values()) if profiles is None and hasattr(self, 'recording_profiles') else profiles
         if not profiles:
-            return self._evaluate_snapshot(sd, ltp, vwap, tick_time)
+            return self._evaluate_snapshot(sd, ltp, vwap, tick_time, alert=allow_alerts)
         # The selected strategy owns user-facing alerts, so evaluate it before
         # profiles that are recorded only for later review.
         profiles = tuple(sorted(profiles, key=lambda profile: not (
@@ -893,11 +896,15 @@ class RealtimeScanner:
         return event
 
     def _process_evaluations(self):
-        while not self._stop_requested.is_set():
+        while True:
             with self._evaluation_condition:
                 self._evaluation_condition.wait_for(
                     lambda: self._pending_evaluations or self._stop_requested.is_set(), timeout=0.25)
                 if not self._pending_evaluations:
+                    if self._stop_requested.is_set() and not self._producer_alive('_tick_worker'):
+                        return
+                    if self._stop_requested.is_set():
+                        self._evaluation_condition.wait(.05)
                     continue
                 key = next(iter(self._pending_evaluations))
                 task = self._pending_evaluations.pop(key)
@@ -907,9 +914,11 @@ class RealtimeScanner:
                 with self._evaluation_lock:
                     current = generation == getattr(self, '_strategy_generation', 0)
                     if len(task) > 8 and task[8]:
-                        self._evaluate_all_snapshot(sd, ltp, vwap, stamp, task[8], allow_alerts=current)
+                        self._evaluate_all_snapshot(sd, ltp, vwap, stamp, task[8],
+                                                    allow_alerts=current and not self._stop_requested.is_set())
                     elif current:
-                        self._evaluate_snapshot(sd, ltp, vwap, stamp, (bull, bear, threshold))
+                        self._evaluate_snapshot(sd, ltp, vwap, stamp, (bull, bear, threshold),
+                                                alert=not self._stop_requested.is_set())
             except Exception as exc:
                 self.processing_error = str(exc)
                 print(f'[EVALUATION ERROR] {exc}')
@@ -918,18 +927,51 @@ class RealtimeScanner:
                     self._evaluation_inflight = False
 
     def _record_history(self, kind, event):
+        worker = getattr(self, '_history_worker', None)
+        if worker is not None and worker.is_alive():
+            # Immutable event payloads stay in order; no evaluations or alerts
+            # are coalesced or silently dropped when disk work is slower.
+            self._history_queue.put((kind, {k: v for k, v in event.items() if k != 'confirmed_signal'}))
+            return
         try:
             self.history.record(kind, event)
         except Exception as exc:
             self.history_error = str(exc)
             print(f'[HISTORY ERROR] {exc}')
 
-    def _archive_charts(self, sd, event):
+    def _process_history(self):
+        while not self._persistence_stopping.is_set() or not self._history_queue.empty():
+            try:
+                batch = [self._history_queue.get(timeout=.1)]
+            except queue.Empty:
+                continue
+            while len(batch) < 100:
+                try:
+                    batch.append(self._history_queue.get_nowait())
+                except queue.Empty:
+                    break
+            try:
+                self.history.record_many(batch)
+            except Exception as exc:
+                self.history_error = str(exc)
+                strategy_log.exception('History batch write failed; retrying without losing events')
+                # Retain this batch in order and apply backpressure to producers.
+                while True:
+                    try:
+                        self.history.record_many(batch)
+                        break
+                    except Exception:
+                        time.sleep(.25)
+            finally:
+                for _ in batch:
+                    self._history_queue.task_done()
+
+    def _archive_charts(self, sd, event, profiles=None):
         try:
             day = datetime.fromtimestamp(event['candle']['time'], MARKET_TZ).date().isoformat()
             base_charts = {tf: chart_snapshot(sd, tf, limit=600) for tf in SUPPORTED_TIMEFRAMES}
             self.history.save_charts(sd.instrument_token, day, base_charts)
-            for profile in getattr(self, 'recording_profiles', {}).values():
+            for profile in (tuple(getattr(self, 'recording_profiles', {}).values()) if profiles is None else profiles):
                 self.history.save_strategy_charts(sd.instrument_token, day, profile['id'], {
                     tf: profile_chart_snapshot(sd, tf, profile, limit=600, base=base_charts[tf]) for tf in SUPPORTED_TIMEFRAMES})
             return True
@@ -945,13 +987,16 @@ class RealtimeScanner:
                 self._archived_chart_candles[archive_key] = event['candle']['time']
             return
         with self._archive_condition:
-            pending = self._pending_archives.get(sd.instrument_token)
-            keys = set(pending[2]) if pending else set()
-            keys.add(archive_key)
-            # Keep the existing live SymbolData reference instead of retaining
-            # hundreds of full EvaluationSnapshot copies while disk work drains.
-            source = getattr(self, 'symbol_data', {}).get(sd.instrument_token, sd)
-            self._pending_archives[sd.instrument_token] = (source, dict(event), keys)
+            day = datetime.fromtimestamp(event['candle']['time'], MARKET_TZ).date()
+            pending_key = (sd.instrument_token, day)
+            pending = self._pending_archives.get(pending_key)
+            keys = dict(pending[2]) if pending else {}
+            keys[archive_key] = event['candle']['time']
+            # A checkpoint must never read future candles from live SymbolData
+            # or apply a strategy version loaded after the checkpoint was queued.
+            snapshot = sd if isinstance(sd, EvaluationSnapshot) else EvaluationSnapshot(sd)
+            profiles = tuple(getattr(self, 'recording_profiles', {}).values())
+            self._pending_archives[pending_key] = (snapshot, dict(event), keys, profiles)
             # Mark the candle when queued so repeated evaluations coalesce.
             self._archived_chart_candles[archive_key] = event['candle']['time']
             self._archive_condition.notify()
@@ -960,19 +1005,23 @@ class RealtimeScanner:
         while True:
             with self._archive_condition:
                 self._archive_condition.wait_for(
-                    lambda: self._pending_archives or self._stop_requested.is_set(), timeout=.25)
+                    lambda: self._pending_archives or self._persistence_stopping.is_set(), timeout=.25)
                 if not self._pending_archives:
-                    if self._stop_requested.is_set():
+                    if self._persistence_stopping.is_set():
                         return
                     continue
                 token = next(iter(self._pending_archives))
-                sd, event, keys = self._pending_archives.pop(token)
+                sd, event, keys, profiles = self._pending_archives.pop(token)
                 self._archive_inflight = True
-            saved = self._archive_charts(sd, event)
+            try:
+                saved = self._archive_charts(sd, event, profiles)
+            except Exception:
+                saved = False
+                strategy_log.exception('Chart archive worker failed')
             with self._archive_condition:
                 if not saved:
-                    for key in keys:
-                        if self._archived_chart_candles.get(key) == event['candle']['time']:
+                    for key, candle_time in keys.items():
+                        if self._archived_chart_candles.get(key) == candle_time:
                             self._archived_chart_candles.pop(key, None)
                 self._archive_inflight = False
                 self._archive_condition.notify_all()
@@ -1059,8 +1108,8 @@ class RealtimeScanner:
                     continue
                 signal = self._confirm_once(token, prior, state)
                 if signal and token not in archived and getattr(self, 'history', None):
-                    with self.symbol_data[token]._lock:
-                        self._archive_charts(self.symbol_data[token], prior)
+                    confirmation = prior.get('confirmation_timeframe', '5m')
+                    self._schedule_chart_archive(self.symbol_data[token], prior, (token, confirmation))
                     archived.add(token)
                 active = (not hasattr(self, 'active_strategy') or
                           (prior.get('strategy_id') == self.active_strategy['id'] and
@@ -1113,10 +1162,12 @@ class RealtimeScanner:
 
     def _process_tick_queue(self):
         """Process ticks away from Twisted so indicator work cannot block pings."""
-        while not self._stop_requested.is_set():
+        while True:
             try:
                 ticks = self._tick_queue.get(timeout=0.25)
             except queue.Empty:
+                if self._stop_requested.is_set():
+                    return
                 continue
             if ticks is None:
                 self._tick_queue.task_done()
@@ -1168,6 +1219,37 @@ class RealtimeScanner:
             close_ticker()
         return self._ticker_closed
 
+    def _producer_alive(self, name):
+        worker = getattr(self, name, None)
+        return isinstance(worker, threading.Thread) and worker.is_alive()
+
+    def flush_background(self, timeout=30):
+        """Drain producers before closing their persistence consumers; bound waits."""
+        deadline = time.monotonic() + timeout
+        for name in ('_tick_worker', '_evaluation_worker'):
+            worker = getattr(self, name, None)
+            if isinstance(worker, threading.Thread):
+                worker.join(max(0, deadline-time.monotonic()))
+        if self._producer_alive('_tick_worker') or self._producer_alive('_evaluation_worker'):
+            strategy_log.warning('Shutdown timeout: tick/evaluation work has not finished')
+            return False
+        stopping = getattr(self, '_persistence_stopping', None)
+        if stopping is not None:
+            stopping.set()
+        condition = getattr(self, '_archive_condition', None)
+        if condition is not None:
+            with condition:
+                condition.notify_all()
+        for name in ('_history_worker', '_archive_worker'):
+            worker = getattr(self, name, None)
+            if isinstance(worker, threading.Thread):
+                worker.join(max(0, deadline-time.monotonic()))
+        notifier.stop_background(max(0, deadline-time.monotonic()))
+        complete = not any(self._producer_alive(name) for name in ('_history_worker', '_archive_worker'))
+        if not complete:
+            strategy_log.warning('Shutdown timeout: queued recordings/checkpoints remain unsaved')
+        return complete
+
     def maintain_history(self, now=None):
         now = market_datetime(now or datetime.now(MARKET_TZ))
         if getattr(self, '_retention_day', None) == now.date():
@@ -1213,15 +1295,19 @@ class RealtimeScanner:
         if self._stop_requested.is_set():
             return
         self._ticker_closed.clear()
+        self._persistence_stopping.clear()
+        self._history_worker = threading.Thread(target=self._process_history, name='kite-history-writer', daemon=True)
+        self._history_worker.start()
+        self._archive_worker = threading.Thread(
+            target=self._process_chart_archives, name='kite-chart-archive-worker', daemon=True)
+        self._archive_worker.start()
+        notifier.start_background()
         self._tick_worker = threading.Thread(
             target=self._process_tick_queue, name="kite-tick-worker", daemon=True)
         self._tick_worker.start()
         self._evaluation_worker = threading.Thread(
             target=self._process_evaluations, name='kite-evaluation-worker', daemon=True)
         self._evaluation_worker.start()
-        self._archive_worker = threading.Thread(
-            target=self._process_chart_archives, name='kite-chart-archive-worker', daemon=True)
-        self._archive_worker.start()
         self.kws = KiteTicker(api_key, access_token)
         tokens = list(self.token_to_symbol.keys())
         self._set_connection_status("connecting")
@@ -1317,4 +1403,6 @@ if __name__ == "__main__":
         scanner.run()
     except KeyboardInterrupt:
         print("\n[SYSTEM] Exiting scanner.")
-        sys.exit(0)
+    finally:
+        scanner.request_stop()
+        scanner.flush_background()

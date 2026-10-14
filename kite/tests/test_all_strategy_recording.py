@@ -71,12 +71,101 @@ class AllStrategyRecordingTests(unittest.TestCase):
             self.evaluate()
         notify.assert_called_once()
         archive.assert_not_called()
-        self.assertEqual(list(self.scanner._pending_archives), [1])
-        self.assertEqual(len(self.scanner._pending_archives[1][2]), 1)
+        archive_key = (1, self.stamp.date())
+        self.assertEqual(list(self.scanner._pending_archives), [archive_key])
+        self.assertEqual(len(self.scanner._pending_archives[archive_key][2]), 1)
         # Another matching evaluation in the same candle does not add work.
         with patch('scanner.notifier.send_alert', return_value=False):
             self.evaluate()
-        self.assertEqual(list(self.scanner._pending_archives), [1])
+        self.assertEqual(list(self.scanner._pending_archives), [archive_key])
+
+    def start_persistence(self):
+        self.scanner._history_worker = threading.Thread(target=self.scanner._process_history, daemon=True)
+        self.scanner._archive_worker = threading.Thread(target=self.scanner._process_chart_archives, daemon=True)
+        self.scanner._history_worker.start()
+        self.scanner._archive_worker.start()
+        self.addCleanup(self.scanner.flush_background)
+
+    def test_blocked_disk_and_charts_do_not_block_live_alerts_or_panels(self):
+        entered, release = threading.Event(), threading.Event()
+        original = self.scanner.history.record_many
+        def blocked(events):
+            entered.set()
+            release.wait(5)
+            return original(events)
+        with patch.object(self.scanner.history, 'record_many', side_effect=blocked), \
+             patch.object(self.scanner, '_archive_charts', side_effect=lambda *args: release.wait(5) or True), \
+             patch('scanner.notifier.send_alert', return_value=True) as notify:
+            self.start_persistence()
+            try:
+                self.evaluate()
+                self.assertTrue(entered.wait(2))
+                self.evaluate()
+                self.assertEqual(notify.call_count, 2)
+                self.assertEqual(self.scanner.event_callback.call_count, 2)
+                self.assertGreater(self.scanner._history_queue.unfinished_tasks, 0)
+            finally:
+                release.set()
+                self.assertTrue(self.scanner.flush_background())
+        self.assertEqual(len(self.scanner.history.events(1, self.day, 'evaluation')), 4)
+        self.assertEqual(len(self.scanner.history.events(1, self.day, 'alert')), 2)
+
+    def test_queued_archive_captures_candles_and_strategy_versions(self):
+        self.scanner._archive_worker = Mock()
+        self.scanner._archive_worker.is_alive.return_value = True
+        with patch('scanner.notifier.send_alert', return_value=False):
+            self.evaluate()
+        snapshot, event, _, profiles = next(iter(self.scanner._pending_archives.values()))
+        old_close = snapshot.candles['5m'][-1]['close']
+        old_version = profiles[0]['version']
+        self.data.candles['5m'][-1]['close'] = 9999
+        self.scanner.recording_profiles['default'] = {**profiles[0], 'version': 'new'}
+        self.assertEqual(snapshot.candles['5m'][-1]['close'], old_close)
+        self.assertEqual(profiles[0]['version'], old_version)
+        self.assertEqual(event['candle']['close'], old_close)
+
+    def test_multi_minute_old_matches_remain_recorded_without_alerts(self):
+        with patch('scanner.notifier.send_alert') as notify:
+            event = self.scanner._evaluate_all_snapshot(
+                self.data, 100, 99, datetime.now(MARKET_TZ).replace(tzinfo=None)-timedelta(minutes=4))
+        self.assertTrue(event['bullish']['triggered'])
+        notify.assert_not_called()
+        self.assertEqual(len(self.scanner.history.events(1, self.day, 'evaluation')), 2)
+
+    def test_shutdown_drains_pending_evaluations_and_recordings_without_alerts(self):
+        self.scanner._queue_evaluation(self.data, 100, 99, datetime.now(MARKET_TZ).replace(tzinfo=None))
+        self.rollover()
+        self.scanner._queue_evaluation(self.data, 100, 99, datetime.now(MARKET_TZ).replace(tzinfo=None))
+        self.start_persistence()
+        self.scanner._stop_requested.set()
+        with patch('scanner.notifier.send_alert') as notify:
+            self.scanner._evaluation_worker = threading.Thread(target=self.scanner._process_evaluations, daemon=True)
+            self.scanner._evaluation_worker.start()
+            self.assertTrue(self.scanner.flush_background(5))
+            notify.assert_not_called()
+        self.assertEqual(self.scanner._pending_evaluations, {})
+        self.assertEqual(self.scanner._pending_archives, {})
+        self.assertEqual(self.scanner._history_queue.unfinished_tasks, 0)
+        self.assertEqual(len(self.scanner.history.events(1, self.day, 'evaluation')), 4)
+
+    def test_transient_database_failure_retries_ordered_events(self):
+        attempts = []
+        original = self.scanner.history.record_many
+        def retry(events):
+            attempts.append(events)
+            if len(attempts) == 1:
+                raise OSError('temporary database failure')
+            return original(events)
+        with patch.object(self.scanner.history, 'record_many', side_effect=retry), \
+             patch('scanner.notifier.send_alert', return_value=False), \
+             self.assertLogs('kite.strategy', level='ERROR'):
+            self.start_persistence()
+            self.evaluate()
+            self.assertTrue(self.scanner.flush_background(5))
+        self.assertGreaterEqual(len(attempts), 2)
+        events = self.scanner.history.events(1, self.day, 'evaluation')
+        self.assertEqual([event['strategy_id'] for event in events], ['default', 'second'])
+        self.assertEqual(self.scanner._history_queue.unfinished_tasks, 0)
 
     def test_selected_profile_is_evaluated_first(self):
         self.scanner.activate_strategy('second')

@@ -199,11 +199,7 @@ async def lifespan(app: FastAPI):
         # Both waits are bounded; an upstream outage must not hang ASGI shutdown.
         await asyncio.to_thread(closed.wait, 2)
         await asyncio.to_thread(scanner_thread.join, 2)
-        for worker in (getattr(scanner, '_tick_worker', None),
-                       getattr(scanner, '_evaluation_worker', None),
-                       getattr(scanner, '_archive_worker', None)):
-            if isinstance(worker, threading.Thread):
-                await asyncio.to_thread(worker.join, 2)
+        await asyncio.to_thread(scanner.flush_background)
 
 
 app = FastAPI(title="Kite Strategy Dashboard", version="1.0.0", lifespan=lifespan)
@@ -230,6 +226,7 @@ async def health():
         "pending_tick_batches": scanner._tick_queue.qsize(),
         "pending_evaluations": len(scanner._pending_evaluations),
         "pending_chart_archives": len(getattr(scanner, '_pending_archives', {})),
+        "pending_history_events": getattr(getattr(scanner, '_history_queue', None), 'unfinished_tasks', 0),
         "evaluation_lag_seconds": getattr(scanner, '_last_evaluation_lag_seconds', None),
         "feed_age_seconds": scanner.feed_age_seconds(),
     }

@@ -4,6 +4,8 @@ import time
 import platform
 import shutil
 import subprocess
+import queue
+import threading
 from datetime import datetime
 
 
@@ -14,6 +16,32 @@ class Notifier:
         self.last_alert_times = {}  # Format: {(symbol, condition_str): timestamp}
         self.cooldown_seconds = 300  # Default 5 minutes
         self.load_cooldown()
+        self._desktop_queue = queue.Queue(maxsize=1000)
+        self._desktop_stop = threading.Event()
+        self._desktop_worker = None
+
+    def start_background(self):
+        if self._desktop_worker is not None and self._desktop_worker.is_alive():
+            return
+        self._desktop_stop.clear()
+        self._desktop_worker = threading.Thread(target=self._deliver_pending, name='kite-desktop-notifications', daemon=True)
+        self._desktop_worker.start()
+
+    def stop_background(self, timeout=5):
+        self._desktop_stop.set()
+        if self._desktop_worker is not None:
+            self._desktop_worker.join(timeout)
+
+    def _deliver_pending(self):
+        while not self._desktop_stop.is_set() or not self._desktop_queue.empty():
+            try:
+                title, message = self._desktop_queue.get(timeout=.1)
+            except queue.Empty:
+                continue
+            try:
+                self._send_desktop(title, message)
+            finally:
+                self._desktop_queue.task_done()
 
     def load_cooldown(self):
         if os.path.exists(CONFIG_FILE):
@@ -56,6 +84,16 @@ class Notifier:
         print(f"  └─ Condition: '{condition_str}'")
         print(f"  └─ Current Price: {price}")
 
+        if self._desktop_worker is not None and self._desktop_worker.is_alive():
+            try:
+                self._desktop_queue.put_nowait((title, message))
+            except queue.Full:
+                print('  └─ Desktop notification queue is full; terminal and saved alert retained')
+        else:
+            self._send_desktop(title, message)
+        return True
+
+    def _send_desktop(self, title, message):
         # Send desktop notification based on operating system
         system = platform.system()
         try:
@@ -65,7 +103,7 @@ class Notifier:
             
             if system == "Darwin":  # macOS
                 applescript = f'display notification "{escaped_msg}" with title "{escaped_title}" sound name "Glass"'
-                subprocess.run(["osascript", "-e", applescript], check=True)
+                subprocess.run(["osascript", "-e", applescript], check=True, timeout=5)
                 
             elif system == "Windows":  # Windows
                 # Powershell script to trigger native Windows balloon/toast notification
@@ -78,7 +116,7 @@ class Notifier:
                     f'$toast.Visible = $True; '
                     f'$toast.ShowBalloonTip(5000)'
                 )
-                subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True)
+                subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, timeout=5)
 
             elif system == "Linux":
                 # notify-send is provided by libnotify on most desktop Linux
@@ -96,8 +134,6 @@ class Notifier:
                     ], check=True, timeout=5)
         except Exception as e:
             print(f"  └─ Failed to send {system} notification: {e}")
-
-        return True
 
 # Singleton instance
 notifier = Notifier()

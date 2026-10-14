@@ -119,9 +119,13 @@ def _candle_dict(row) -> dict[str, Any]:
 
 
 def _series_points(frame, values) -> list[dict[str, Any]]:
+    times = pd.DatetimeIndex(frame['time'])
+    if times.tz is None:
+        times = times.tz_localize('Asia/Kolkata')
+    seconds = times.as_unit('s').asi8
     return [
-        {"time": _epoch_seconds(frame.iloc[position]["time"]), "value": float(value)}
-        for position, value in enumerate(values)
+        {"time": int(stamp), "value": float(value)}
+        for stamp, value in zip(seconds, values)
         if not pd.isna(value)
     ]
 
@@ -312,25 +316,28 @@ def chart_snapshot(symbol_data, timeframe: str = "5m", limit: int = 300) -> dict
     if frame.empty:
         return {"timeframe": timeframe, "candles": [], "overlays": [], "studies": [], "levels": {}}
 
-    candles = [_candle_dict(row) for _, row in frame.iterrows()]
+    records = frame.to_dict('records')
+    times = pd.DatetimeIndex(frame['time'])
+    if times.tz is None:
+        times = times.tz_localize('Asia/Kolkata')
+    seconds = times.as_unit('s').asi8
+    candles = [{'time': int(stamp), **{key: float(row[key]) for key in
+                ('open', 'high', 'low', 'close')}, 'volume': float(row.get('volume', 0))}
+               for stamp, row in zip(seconds, records)]
     ha_frame = calculate_heikin_ashi(frame) if timeframe == "15m" else None
     overlays = []
     for overlay_id, label, color, period, source, default_visible in OVERLAY_SPECS[timeframe]:
         values = ha_frame["close"] if source == "ha_close" else frame["close"]
         calculated = calculate_ema(values, period)
-        points = [
-            {"time": _epoch_seconds(frame.iloc[position]["time"]), "value": float(value)}
-            for position, value in enumerate(calculated)
-            if not pd.isna(value)
-        ]
+        points = _series_points(frame, calculated)
         overlays.append({"id": overlay_id, "label": label, "color": color,
                          "period": period, "source": source,
                          "default_visible": default_visible, "points": points})
 
     if timeframe in ("3m", "5m"):
         vwap_points = [
-            {"time": _epoch_seconds(row["time"]), "value": float(row["vwap"])}
-            for _, row in frame.iterrows()
+            {"time": int(stamp), "value": float(row["vwap"])}
+            for stamp, row in zip(seconds, records)
             if not pd.isna(row.get("vwap")) and float(row["vwap"]) > 0
         ]
         overlays.append({"id": "vwap", "label": "VWAP", "color": "#a78bfa",
