@@ -47,6 +47,51 @@ class AllStrategyRecordingTests(unittest.TestCase):
         self.stamp += timedelta(minutes=5)
         self.data.candles['5m'].append(dict(time=self.stamp, open=100., close=100., high=101., low=99., volume=100, vwap=99.))
 
+    def check_btst_signal_alert_and_marker(self, side):
+        source = Path(__file__).resolve().parents[1] / 'strategies' / 'btst_setup.json'
+        (self.root / 'strategies' / source.name).write_text(source.read_text())
+        self.scanner.activate_strategy('btst_setup')
+        direction = 1 if side == 'bullish' else -1
+        for rows in self.data.candles.values():
+            for i, row in enumerate(rows):
+                close = 300 + direction * i * i / 20
+                row.update(open=close-direction, close=close,
+                           high=close+2, low=close-2)
+        price = self.data.candles['1h'][-1]['close']
+        # Real TA-Lib indicators and the actual seven-rule BTST profile.
+        with patch('scanner.notifier.send_alert', return_value=True) as notify:
+            event = self.scanner._evaluate_all_snapshot(
+                self.data, price, price, datetime.now(MARKET_TZ).replace(tzinfo=None))
+            self.assertTrue(event[side]['triggered'], event[side]['rules'])
+            self.assertEqual(event[side]['passed'], 7)
+            notify.assert_called_once()
+            self.assertEqual(notify.call_args.kwargs['is_bullish'], side == 'bullish')
+            self.assertIn('btst_setup:', notify.call_args.kwargs['cooldown_key'])
+        self.assertEqual(len(self.scanner.history.events(1, self.day, 'alert', 'btst_setup')), 1)
+
+        self.rollover()
+        # Removing the volume spike must block both the new signal and alert,
+        # while rollover confirms the previous qualifying candle's marker.
+        self.data.candles['1h'][-1]['volume'] = 1
+        with patch('scanner.notifier.send_alert') as notify:
+            event = self.scanner._evaluate_all_snapshot(
+                self.data, price, price, datetime.now(MARKET_TZ).replace(tzinfo=None))
+            self.assertFalse(event[side]['triggered'])
+            self.assertEqual(event[side]['passed'], 6)
+            notify.assert_not_called()
+        self.assertTrue(event['confirmed_signal'][side]['triggered'])
+        self.assertEqual(event['confirmed_signal']['strategy_id'], 'btst_setup')
+        confirmed = self.scanner.history.events(1, self.day, 'confirmed', 'btst_setup')
+        self.assertEqual(len(confirmed), 1)
+        self.assertTrue(confirmed[0][side]['triggered'])
+        self.scanner.event_callback.assert_called()
+
+    def test_btst_bullish_signal_alert_and_confirmed_marker(self):
+        self.check_btst_signal_alert_and_marker('bullish')
+
+    def test_btst_bearish_signal_alert_and_confirmed_marker(self):
+        self.check_btst_signal_alert_and_marker('bearish')
+
     def test_all_profiles_record_and_only_active_profile_alerts_and_publishes(self):
         with patch('scanner.notifier.send_alert', return_value=True) as notify:
             event = self.evaluate()

@@ -172,6 +172,7 @@ class SymbolData:
                 typical_price = (h + l + c) / 3.0
                 candle_volume = float(r['volume'])
                 session_value += typical_price * candle_volume
+                cumulative_volume_start = session_volume
                 session_volume += candle_volume
                 # Kite historical candles do not expose exchange VWAP. This is
                 # the standard volume-weighted reconstruction for chart history;
@@ -185,8 +186,8 @@ class SymbolData:
                     'low': l,
                     'close': c,
                     'volume': r['volume'],
-                    'cumulative_volume_start': 0,
-                    'cumulative_volume_end': 0,
+                    'cumulative_volume_start': cumulative_volume_start,
+                    'cumulative_volume_end': session_volume,
                     'vwap': historical_vwap
                 })
             
@@ -232,6 +233,7 @@ class SymbolData:
         if previous_tick is not None and tick_time < previous_tick:
             return set()
         self._latest_exchange_time = tick_time
+        session_open = tick_time.replace(hour=9, minute=15, second=0, microsecond=0)
 
         rolled_intervals = set()
         for iv in self.intervals:
@@ -257,14 +259,18 @@ class SymbolData:
             # Check if we should start a new candle or update current one
             if not self.candles[iv]:
                 # First candle
+                # Daily volume and the opening bucket start at session volume
+                # zero. For a mid-session bucket with no history, only count
+                # observed volume; its earlier trades cannot be reconstructed.
+                start_volume = 0 if iv == '1d' or bucket_time == session_open else volume
                 new_candle = {
                     'time': bucket_time,
                     'open': ltp,
                     'high': ltp,
                     'low': ltp,
                     'close': ltp,
-                    'volume': 0,
-                    'cumulative_volume_start': volume,
+                    'volume': max(0, volume - start_volume),
+                    'cumulative_volume_start': start_volume,
                     'cumulative_volume_end': volume,
                     'vwap': vwap
                 }
@@ -273,7 +279,12 @@ class SymbolData:
             elif bucket_time > self.last_tick_time[iv]:
                 rolled_intervals.add(iv)
                 # Close the current candle and open a new one
-                start_volume = self.candles[iv][-1]['cumulative_volume_end']
+                # Kite's cumulative traded volume resets every session.
+                # Never subtract the previous trading day's total.
+                if same_session:
+                    start_volume = self.candles[iv][-1]['cumulative_volume_end']
+                else:
+                    start_volume = 0 if iv == '1d' or bucket_time == session_open else volume
                 
                 new_candle = {
                     'time': bucket_time,

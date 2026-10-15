@@ -323,6 +323,14 @@ Restart after the parser upgrade, then
 select and activate this profile. It is added without changing the saved active
 strategy selection.
 
+Live candle volume uses Kite's cumulative session volume minus the cumulative
+volume before that candle. Historical bars seed these baselines from each
+session's candle volumes; baselines reset at the next trading session. Restart
+after updating to rebuild any previously inflated in-memory volumes. If history
+is unavailable at a mid-session startup, intraday candle volume counts only
+trades observed since startup until the next bucket; daily volume still uses
+the session total. Existing saved evaluations and markers are not rewritten.
+
 
 Strategy state is synchronized through the existing dashboard WebSocket; there is
 no recurring `/api/strategies` HTTP polling. Page load and actual strategy changes
