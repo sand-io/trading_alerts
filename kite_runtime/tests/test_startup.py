@@ -125,7 +125,10 @@ class LauncherTests(unittest.TestCase):
                 else:
                     self.assertEqual(command[-1], 'mtf_alert')
                     self.assertEqual(popen.call_args.kwargs['cwd'], start.ROOT)
-                stop.assert_called_once_with([process])
+                if app == 'kite':
+                    stop.assert_called_once_with([process], timeout=75)
+                else:
+                    stop.assert_called_once_with([process])
         self.assertEqual(auth.call_count, 2)
 
     @patch('kite_runtime.launcher.time.monotonic', return_value=0)
@@ -136,6 +139,14 @@ class LauncherTests(unittest.TestCase):
         start.stop_services([child])
         child.send_signal.assert_called_once_with(start.signal.SIGINT)
         child.kill.assert_called_once()
+
+    @patch('kite_runtime.launcher.time.monotonic', return_value=0)
+    def test_kite_grace_period_allows_recording_flush(self, _clock):
+        child = MagicMock()
+        child.poll.return_value = None
+        start.stop_services([child], timeout=75)
+        child.wait.assert_called_once_with(timeout=75)
+        child.kill.assert_not_called()
 
 
 if __name__ == '__main__':

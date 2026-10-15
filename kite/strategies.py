@@ -5,6 +5,8 @@ import math
 import re
 from pathlib import Path
 from conditions import Condition
+from nnf_strategy import build_rules, settings_from_json, WARNING
+from instrument_scope import NNF_SCOPE
 
 CONFIRMATION_TIMEFRAMES = ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d")
 
@@ -28,7 +30,10 @@ class StrategyStore:
 
     def selected(self):
         if self.selection.exists():
-            return json.loads(self.selection.read_text())['id']
+            selected = json.loads(self.selection.read_text())['id']
+            if selected in ('nnf_4h_1h_15m', 'nnf_15m_5m_3m') and (self.directory / 'nnf.json').exists():
+                return 'nnf'
+            return selected
         return 'default'
 
     def save_selection(self, strategy_id):
@@ -47,8 +52,16 @@ class StrategyStore:
             raise ValueError('Threshold must be greater than 0 and at most 100')
         if cooldown is not None and (not isinstance(cooldown, (float, int)) or not math.isfinite(cooldown) or cooldown < 0):
             raise ValueError('Cooldown must be a nonnegative number')
-        parsed = {}
-        for side in ('bullish', 'bearish'):
+        engine = raw.get('engine', 'conditions')
+        if engine not in ('conditions', 'nnf'):
+            raise ValueError('Unknown strategy engine')
+        scope = raw.get('instrument_scope')
+        if scope is not None and scope != NNF_SCOPE:
+            raise ValueError('instrument_scope must select nearest standard MCX GOLD and CRUDEOIL futures')
+        if engine == 'nnf' and scope != NNF_SCOPE:
+            raise ValueError('NNF requires its MCX GOLD and CRUDEOIL instrument_scope')
+        parsed = build_rules(settings_from_json(raw)) if engine == 'nnf' else {}
+        for side in (() if engine == 'nnf' else ('bullish', 'bearish')):
             lines = raw.get(side, [])
             if not isinstance(lines, list) or any(not isinstance(line, str) for line in lines):
                 raise ValueError(f'{side} must be a list of rule strings')
@@ -65,7 +78,8 @@ class StrategyStore:
         if not any(parsed.values()):
             raise ValueError('Strategy must contain at least one rule')
         rule_intervals = {rule.interval for rules in parsed.values() for rule in rules} - {'tick'}
-        inferred = next(iter(rule_intervals)) if len(rule_intervals) == 1 else '5m'
+        inferred = ('3m' if engine == 'nnf' else
+                    next(iter(rule_intervals)) if len(rule_intervals) == 1 else '5m')
         confirmation = raw.get('confirmation_timeframe', inferred)
         if confirmation not in CONFIRMATION_TIMEFRAMES:
             raise ValueError('confirmation_timeframe must be one of: ' + ', '.join(CONFIRMATION_TIMEFRAMES))
@@ -73,5 +87,7 @@ class StrategyStore:
         if not isinstance(name, str) or not name.strip():
             raise ValueError('Strategy name must be nonempty')
         return {'id': strategy_id, 'name': name, 'threshold': threshold,
+                'engine': engine, 'warnings': [WARNING] if engine == 'nnf' else [],
+                'instrument_scope': scope,
                 'cooldown_seconds': cooldown, 'confirmation_timeframe': confirmation, **parsed,
                 'version': hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()[:16]}

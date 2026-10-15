@@ -18,6 +18,15 @@ const context=vm.createContext({document,
  ResizeObserver:class{observe(){}},setInterval(){},clearInterval(){},clearTimeout(){},
  fetch(){return new Promise(()=>{})},window:{},console});
 vm.runInContext(html.split('<script>')[1].split('</script>')[0],context);
+vm.runInContext("renderLive({strategy_applicable:false,scope_message:'Only MCX Gold and Crude Oil futures.'})",context);
+assert.equal(nodes.get('bullRules').children.length,0);
+assert.equal(nodes.get('bearRules').children.length,0);
+assert.equal(nodes.get('strategyContext').textContent,'Only MCX Gold and Crude Oil futures.');
+vm.runInContext("feedMarketOpen=true;setStatus('connected');",context);
+assert.equal(nodes.get('status').textContent,'Kite feed connected');
+vm.runInContext("feedMarketOpen=false;setStatus('connected');",context);
+assert.equal(nodes.get('status').textContent,'Feed connected · outside regular hours');
+vm.runInContext('feedMarketOpen=null',context);
 assert.equal(chartCount,2);
 chartMocks[0].rangeCallback({from:0,to:5});
 assert.deepEqual(chartMocks[1].range,{from:0,to:5});
@@ -363,6 +372,15 @@ function testLiveRuleDelivery(){
  live.reviewMode=true;send(true);
  live.reviewMode=false;live.loadingSnapshot=true;send(true);
  assert.equal(liveNodes.get('bullRules').children[0].children[0].textContent,'×');
+ live.loadingSnapshot=false;
+ const nnfEvent={type:'strategy_update',instrument_token:1,market_time:'2026-10-13T11:03:01+05:30',
+  evaluation_mode:'closed_candle',as_of:Math.floor(Date.parse('2026-10-13T11:03:00+05:30')/1000),
+  nnf:{warning:'Literal Stochastic: K equals D; activation cannot occur.'},confirmation_timeframe:'3m',
+  bullish:{passed:0,total:9,percentage:0,rules:[]},bearish:{passed:0,total:9,percentage:0,rules:[]}};
+ clients[0].onmessage({data:JSON.stringify(nnfEvent)});
+ assert.ok(liveNodes.get('strategyContext').textContent.includes('Completed candle rules as of'));
+ assert.ok(liveNodes.get('strategyContext').textContent.includes('K equals D'));
+ assert.ok(!liveNodes.get('strategyContext').textContent.includes('may be provisional'));
  console.log('WebSocket rule ticks/crosses update despite chart failures; review and symbol isolation passed');
 }
 testLiveRuleDelivery();

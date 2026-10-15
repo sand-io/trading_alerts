@@ -10,6 +10,7 @@ from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+from nnf_strategy import event_details as nnf_event_details, NNFDataView
 
 from conditions import (
     calculate_adx,
@@ -19,6 +20,7 @@ from conditions import (
     calculate_macd,
     calculate_obv,
     calculate_rsi,
+    calculate_stoch,
 )
 
 
@@ -69,11 +71,13 @@ class SideResult:
 
 
 def evaluate_side(side: str, conditions: Iterable, ltp: float, vwap: float,
-                  symbol_data, threshold: float) -> SideResult:
+                  symbol_data, threshold: float, as_of=None) -> SideResult:
     results: list[RuleResult] = []
     for condition in conditions:
         try:
-            passed = bool(condition.evaluate(ltp, vwap, symbol_data))
+            passed = bool(condition.evaluate_at(ltp, vwap, symbol_data, as_of)
+                          if hasattr(condition, 'evaluate_at')
+                          else condition.evaluate(ltp, vwap, symbol_data))
             results.append(RuleResult(condition.raw_text, passed))
         except Exception as exc:  # preserve visibility without killing the feed
             results.append(RuleResult(condition.raw_text, False, str(exc)))
@@ -220,10 +224,11 @@ def historical_evaluation(symbol_data, bullish_conditions, bearish_conditions,
     price = float(row['close'])
     raw_vwap = row.get('vwap')
     vwap = float(raw_vwap) if pd.notna(raw_vwap) else None
+    as_of = datetime.now(ZoneInfo('Asia/Kolkata'))
     bullish = evaluate_side('bullish', bullish_conditions, price, vwap,
-                            symbol_data, threshold)
+                            symbol_data, threshold, as_of=as_of)
     bearish = evaluate_side('bearish', bearish_conditions, price, vwap,
-                            symbol_data, threshold)
+                            symbol_data, threshold, as_of=as_of)
     bullish, bearish = resolve_direction(bullish, bearish)
     missing = missing_rule_timeframes(symbol_data, bullish_conditions, bearish_conditions)
     if missing:
@@ -233,6 +238,7 @@ def historical_evaluation(symbol_data, bullish_conditions, bearish_conditions,
     event.update(data_ready=not missing, missing_timeframes=missing)
     event['evaluation_source'] = 'historical'
     event['as_of'] = _epoch_seconds(row['time'])
+    event.update(nnf_event_details(symbol_data, list(bullish_conditions) + list(bearish_conditions), as_of))
     return event
 
 
@@ -402,8 +408,15 @@ def live_event(symbol_data, ltp: float, vwap: float, bullish: SideResult,
 
 def profile_chart_snapshot(symbol_data, timeframe, profile, limit=300, base=None):
     """Archive the indicators used by this profile with its shared candle history."""
-    chart = dict(base) if base is not None else chart_snapshot(symbol_data, timeframe, limit)
-    frame = symbol_data.get_dataframe(timeframe).tail(limit).copy()
+    nnf = profile.get('engine') == 'nnf'
+    data = NNFDataView(symbol_data) if nnf else symbol_data
+    extended_interval = '1h' if timeframe == '4h' else timeframe
+    uses_extended = nnf and extended_interval in getattr(symbol_data, 'nnf_candles', {})
+    chart = (dict(base) if base is not None and not uses_extended else
+             chart_snapshot(data, timeframe, limit))
+    frame = data.get_dataframe(timeframe).copy()
+    if not nnf:
+        frame = frame.tail(limit)
     chart.update(strategy_id=profile['id'], strategy_version=profile['version'],
                  confirmation_timeframe=profile.get('confirmation_timeframe', '5m'))
     if frame.empty:
@@ -431,10 +444,16 @@ def profile_chart_snapshot(symbol_data, timeframe, profile, limit=300, base=None
 
     for rule in conditions:
         params, kind = rule.params, rule.rule_type
-        if kind in ('close_ema', 'prev_close_ema'):
+        if kind == 'nnf_bias':
+            for period in (9, 50, 200):
+                ema_overlay(period)
+            k, d = calculate_stoch(frame, 14, 3, 1)
+            study('stoch14_3_1', 'Stochastic (14,1,3) — K = D',
+                  [('stoch_k', '%K (SMA 3)', k), ('stoch_d', '%D (SMA 1)', d)])
+        elif kind in ('close_ema', 'prev_close_ema'):
             ema_overlay(params['ema_period'])
-        elif kind in ('ema_ema', 'ha_ema_ema'):
-            source = 'ha_close' if kind == 'ha_ema_ema' else 'close'
+        elif kind in ('ema_ema', 'ha_ema_ema', 'ha_ema_cross'):
+            source = 'ha_close' if kind in ('ha_ema_ema', 'ha_ema_cross') else 'close'
             for period in (params['ema1'], params['ema2']):
                 ema_overlay(period, source)
         elif kind == 'close_vwap':
@@ -448,14 +467,24 @@ def profile_chart_snapshot(symbol_data, timeframe, profile, limit=300, base=None
             for key in ('value', 'lower', 'upper', 'breakout', 'breakdown'):
                 if key in params:
                     levels[params[key]] = {'value': params[key], 'label': str(params[key]), 'color': '#627287'}
-            study(identifier, f'RSI ({period})', [(identifier, 'RSI', calculate_rsi(frame['close'], period))], list(levels.values()))
-        elif kind == 'macd':
+            values = calculate_rsi(frame['close'], period)
+            lines = [(identifier, 'RSI', values)]
+            if params.get('smoothing_period'):
+                smoothing = params['smoothing_period']
+                lines.append((f'{identifier}_sma{smoothing}', f'RSI SMA {smoothing}', values.rolling(smoothing).mean()))
+            study(identifier, f'RSI ({period})', lines, list(levels.values()))
+        elif kind in ('macd', 'ha_macd', 'ha_histogram'):
             fast, slow, signal = params['fast'], params['slow'], params['signal']
-            values, signals = calculate_macd(frame, fast, slow, signal)
-            identifier = f'macd{fast}_{slow}_{signal}'
-            study(identifier, f'MACD ({fast},{slow},{signal})', [(identifier, 'MACD', values),
-                (identifier + '_signal', 'Signal', signals)], [{'value': 0, 'label': 'Zero', 'color': '#627287'}])
-        elif kind == 'obv_ema':
+            source = calculate_heikin_ashi(frame) if kind != 'macd' else frame
+            values, signals = calculate_macd(source, fast, slow, signal)
+            hist = values - signals
+            identifier = ('ha_' if kind != 'macd' else '') + f'macd{fast}_{slow}_{signal}'
+            lines = [(identifier, 'MACD', values), (identifier + '_signal', 'Signal', signals)]
+            if kind != 'macd':
+                lines.append((identifier + '_histogram', 'Histogram', hist))
+            study(identifier, ('HA Close ' if kind != 'macd' else '') + f'MACD ({fast},{slow},{signal})', lines,
+                  [{'value': 0, 'label': 'Zero', 'color': '#627287'}])
+        elif kind in ('obv_ema', 'obv_cross'):
             period = params['ema_period']
             values = calculate_obv(frame)
             study(f'obv{period}', f'OBV / EMA ({period})', [('obv', 'OBV', values),
@@ -476,4 +505,10 @@ def profile_chart_snapshot(symbol_data, timeframe, profile, limit=300, base=None
     chart['overlays'] = list(overlays.values())
     chart['studies'] = (list(studies.values()) or
                         (_strategy_studies(frame, timeframe) if timeframe in ('3m', '4h') else []))
+    if nnf:
+        # Calculate on the complete lookback, then restrict only serialization.
+        visible_times = {row['time'] for row in chart['candles']}
+        for line in chart['overlays'] + [line for study in chart['studies'] for line in study['lines']]:
+            line['points'] = [point for point in line['points'] if point['time'] in visible_times]
+        chart['warnings'] = profile.get('warnings', [])
     return chart

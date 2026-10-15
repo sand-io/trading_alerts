@@ -83,8 +83,9 @@ def calculate_heikin_ashi(df):
     
     ha_open = np.zeros(len(df))
     ha_open[0] = (df['open'].iloc[0] + df['close'].iloc[0]) / 2.0
+    ha_closes = ha_df['close'].to_numpy()
     for i in range(1, len(df)):
-        ha_open[i] = (ha_open[i-1] + ha_df['close'].iloc[i-1]) / 2.0
+        ha_open[i] = (ha_open[i-1] + ha_closes[i-1]) / 2.0
     ha_df['open'] = ha_open
     
     ha_df['high'] = np.maximum(df['high'], np.maximum(ha_df['open'], ha_df['close']))

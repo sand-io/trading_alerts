@@ -222,6 +222,7 @@ async def health():
         "history_error": getattr(scanner, 'history_error', None),
         "recording_strategies": list(getattr(scanner, 'recording_profiles', {})),
         "strategy_errors": getattr(scanner, 'profile_errors', {}),
+        "instrument_errors": getattr(scanner, 'instrument_errors', {}),
         "historical_requests": history_requests.stats(),
         "pending_tick_batches": scanner._tick_queue.qsize(),
         "pending_evaluations": len(scanner._pending_evaluations),
@@ -262,12 +263,14 @@ def snapshot(instrument_token: int, timeframe: str = "5m"):
         if timeframe not in SUPPORTED_TIMEFRAMES:
             raise HTTPException(400, f"Timeframe must be one of: {', '.join(SUPPORTED_TIMEFRAMES)}")
         payload = chart_snapshot(symbol_data, timeframe=timeframe, limit=600)
-        if hasattr(scanner, 'active_strategy'):
+        applicable = (not hasattr(scanner, 'active_strategy') or
+                      scanner.profile_applies(scanner.active_strategy, symbol_data))
+        if hasattr(scanner, 'active_strategy') and applicable:
             payload = profile_chart_snapshot(symbol_data, timeframe, scanner.active_strategy, limit=600, base=payload)
         strategy = scanner.latest_results.get(instrument_token)
         if strategy is not None and hasattr(scanner, 'active_strategy') and strategy.get('strategy_version') is not None and strategy['strategy_version'] != scanner.active_strategy['version']:
             strategy = None
-        if strategy is None:
+        if strategy is None and applicable:
             with symbol_data._lock:
                 strategy = historical_evaluation(symbol_data, scanner.bullish_conditions,
                                                  scanner.bearish_conditions, scanner.alert_threshold,
@@ -276,14 +279,20 @@ def snapshot(instrument_token: int, timeframe: str = "5m"):
             strategy = {**strategy, 'strategy_id': scanner.active_strategy['id'],
                         'strategy_name': scanner.active_strategy['name'],
                         'strategy_version': scanner.active_strategy['version']}
+        if not applicable:
+            strategy = None
         payload.update({
             "symbol": symbol_data.symbol,
             "instrument_token": instrument_token,
             "strategy": strategy,
+            "strategy_applicable": applicable,
+            "scope_message": ('This strategy applies only to standard MCX Gold and Crude Oil futures.'
+                              if getattr(scanner, 'active_strategy', {}).get('instrument_scope') else
+                              'This strategy applies to the configured watchlist; this contract is subscribed for NNF.'),
             "market": getattr(scanner, 'latest_market_results', {}).get(instrument_token),
             "signals": scanner.history.events(instrument_token,
                 datetime.now(ZoneInfo('Asia/Kolkata')).date().isoformat(),
-                'confirmed', getattr(scanner, 'active_strategy', {}).get('id', 'default')),
+                'confirmed', getattr(scanner, 'active_strategy', {}).get('id', 'default')) if applicable else [],
             "threshold": scanner.alert_threshold,
             "confirmation_timeframe": getattr(scanner, 'active_strategy', {}).get('confirmation_timeframe', '5m'),
         })
@@ -348,6 +357,7 @@ async def live_updates(websocket: WebSocket, instrument_token: int):
                     "status": scanner.connection_status,
                     "error": scanner.connection_error,
                     "feed_age_seconds": scanner.feed_age_seconds(),
+                    "market_open": scanner.market_is_open(),
                 })
                 continue
             try:

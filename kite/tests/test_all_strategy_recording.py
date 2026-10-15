@@ -63,6 +63,41 @@ class AllStrategyRecordingTests(unittest.TestCase):
         self.scanner.event_callback.assert_called_once()
         self.assertEqual(self.scanner.event_callback.call_args.args[0]['strategy_id'], 'default')
 
+    def test_failed_nnf_profile_does_not_stop_legacy_alerts_or_other_recordings(self):
+        active = self.scanner.active_strategy
+        second = self.scanner.recording_profiles['second']
+        broken = {**second, 'id': 'nnf', 'engine': 'nnf'}
+        evaluate = self.scanner._evaluate_snapshot
+        def fail_nnf(*args, **kwargs):
+            if kwargs['profile']['id'] == 'nnf':
+                raise RuntimeError('NNF evaluation failure')
+            return evaluate(*args, **kwargs)
+        with patch.object(self.scanner, '_evaluate_snapshot', side_effect=fail_nnf), \
+             patch('scanner.notifier.send_alert', return_value=True) as notify, \
+             self.assertLogs('kite.strategy', level='ERROR'):
+            event = self.scanner._evaluate_all_snapshot(self.data, 100, 99,
+                datetime.now(MARKET_TZ).replace(tzinfo=None), profiles=(active, broken, second))
+        self.assertEqual(event['strategy_id'], 'default')
+        notify.assert_called_once()
+        for identifier in ('default', 'second'):
+            self.assertEqual(len(self.scanner.history.events(1, self.day, 'evaluation', identifier)), 1)
+        self.assertEqual(self.scanner.processing_error, 'NNF evaluation failure')
+
+    def test_failed_nnf_chart_does_not_stop_legacy_chart_recordings(self):
+        active = self.scanner.active_strategy
+        second = self.scanner.recording_profiles['second']
+        broken = {**second, 'id': 'nnf', 'engine': 'nnf'}
+        def fail_nnf(data, interval, profile, **kwargs):
+            if profile['id'] == 'nnf':
+                raise RuntimeError('NNF chart failure')
+            return profile_chart_snapshot(data, interval, profile, **kwargs)
+        event = {'candle': {'time': int(self.stamp.replace(tzinfo=MARKET_TZ).timestamp())}}
+        with patch('scanner.profile_chart_snapshot', side_effect=fail_nnf), self.assertLogs('kite.strategy', level='ERROR'):
+            self.assertFalse(self.scanner._archive_charts(self.data, event, profiles=(active, broken, second)))
+        for identifier in ('default', 'second'):
+            self.assertIsNotNone(self.scanner.history.strategy_chart(1, self.day, '5m', identifier))
+        self.assertEqual(self.scanner.history_error, 'NNF chart failure')
+
     def test_active_alert_precedes_coalesced_chart_archive(self):
         self.scanner._archive_worker = Mock()
         self.scanner._archive_worker.is_alive.return_value = True
@@ -78,6 +113,22 @@ class AllStrategyRecordingTests(unittest.TestCase):
         with patch('scanner.notifier.send_alert', return_value=False):
             self.evaluate()
         self.assertEqual(list(self.scanner._pending_archives), [archive_key])
+
+    def test_chart_archives_wait_for_live_evaluation_and_then_drain(self):
+        saved = threading.Event()
+        self.scanner._evaluation_inflight = True
+        self.scanner._archive_charts = Mock(side_effect=lambda *args: saved.set() or True)
+        self.start_persistence()
+        with patch('scanner.notifier.send_alert', return_value=True) as notify:
+            self.evaluate()
+            notify.assert_called_once()
+        self.assertFalse(saved.wait(.1))
+        self.assertTrue(self.scanner._pending_archives)
+        self.scanner._evaluation_inflight = False
+        with self.scanner._archive_condition:
+            self.scanner._archive_condition.notify_all()
+        self.assertTrue(saved.wait(2))
+        self.assertTrue(self.scanner.flush_background())
 
     def start_persistence(self):
         self.scanner._history_worker = threading.Thread(target=self.scanner._process_history, daemon=True)

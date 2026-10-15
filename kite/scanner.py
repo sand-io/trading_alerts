@@ -17,6 +17,9 @@ from notifier import notifier
 from history import HistoryStore
 from historical import HistoricalRequests
 from strategies import StrategyStore
+from instrument_scope import applies, nearest_futures
+from market_sessions import session_bounds, session_is_open
+from nnf_strategy import event_details as nnf_event_details, history_days as nnf_history_days
 from strategy_runtime import evaluate_side, live_event, resolve_direction, missing_rule_timeframes
 from strategy_runtime import _candle_dict, SUPPORTED_TIMEFRAMES, BASE_TIMEFRAMES, chart_snapshot, profile_chart_snapshot
 
@@ -62,14 +65,13 @@ def normalize_kite_tick(tick):
     return normalized
 
 
-def regular_session_tick(value):
-    """NSE equity normal-session window, excluding pre/post-market updates."""
+def regular_session_tick(value, exchange='NSE'):
+    """Normal exchange session; preserve existing stock tick filtering."""
     local = market_datetime(value)
-    start = local.replace(hour=9, minute=15, second=0, microsecond=0)
-    end = local.replace(hour=15, minute=30, second=0, microsecond=0)
-    return start <= local < end
+    start, end = session_bounds(local, exchange)
+    return start <= local < end and (exchange != 'MCX' or local.weekday() < 5)
 
-def resample_candles(df_1h, target_interval='4h'):
+def resample_candles(df_1h, target_interval='4h', exchange='NSE'):
     """
     Kite Connect Historical API does not natively support 4-hour candles.
     This helper aggregates 1-hour candles into 4-hour blocks on the fly.
@@ -82,7 +84,7 @@ def resample_candles(df_1h, target_interval='4h'):
     df = df.set_index('time')
     
     # Resample candles in 4-hour intervals starting from the market open (9:15 AM)
-    resampled = df.resample('4h', closed='left', label='left', origin='start_day', offset=timedelta(hours=9, minutes=15)).agg({
+    resampled = df.resample('4h', closed='left', label='left', origin='start_day', offset=timedelta(hours=9, minutes=0 if exchange == 'MCX' else 15)).agg({
         'open': 'first',
         'high': 'max',
         'low': 'min',
@@ -94,21 +96,33 @@ def resample_candles(df_1h, target_interval='4h'):
     return resampled
 
 class SymbolData:
-    def __init__(self, instrument_token, symbol):
+    def __init__(self, instrument_token, symbol, instrument=None):
         self.instrument_token = instrument_token
         self.symbol = symbol
+        self.instrument = dict(instrument or {})
+        self.exchange = self.instrument.get('exchange') or (symbol.split(':')[0] if ':' in symbol else 'NSE')
+        self.instrument_type = self.instrument.get('instrument_type', 'FUT')
         self.intervals = set()  # set of active intervals (e.g. {'5m', '15m'})
         self.candles = {}       # interval -> list of candle dicts
+        self.nnf_candles = {}   # extended NNF lookback; never changes legacy inputs
         self.last_tick_time = {} # interval -> last bucket datetime
         self._lock = threading.RLock()
         self.history_errors = {}
         self.history_stop = None
+        self.history_days = {}
+        self.loaded_history_days = {}
+        self._nnf_evaluation_cache = {}
 
-    def check_and_add_intervals(self, kite, required_intervals):
+    def check_and_add_intervals(self, kite, required_intervals, history_days=None):
         """
         Dynamically initializes candle tracking for new intervals on-the-fly.
         """
         with self._lock:
+            upgrades = set()
+            for iv, days in (history_days or {}).items():
+                if days > self.loaded_history_days.get(iv, 0):
+                    self.history_days[iv] = days
+                    upgrades.add(iv)
             # If 4h is in required, make sure 1h is also added so we can compile 4h candles
             resolved_intervals = set(required_intervals)
             if '4h' in resolved_intervals:
@@ -117,13 +131,28 @@ class SymbolData:
             for iv in resolved_intervals:
                 if iv in ['tick', '4h']:
                     continue
-                if iv not in self.intervals:
+                if iv not in self.intervals or iv in upgrades:
                     if os.getenv("VERBOSE", "false").lower() == "true":
                         print(f"[SYSTEM] Initializing candle tracking for {self.symbol} on {iv} interval...")
-                    self.candles[iv] = []
-                    self.last_tick_time[iv] = None
+                    was_initialized = iv in self.intervals
+                    existing = self.candles.get(iv, [])
+                    self.candles.setdefault(iv, [])
+                    self.last_tick_time.setdefault(iv, None)
                     self.intervals.add(iv)
                     self.initialize_historical_candles(kite, iv)
+                    if self.candles[iv] and iv not in self.history_errors:
+                        self.loaded_history_days[iv] = self.history_days.get(iv, 0)
+                    self._nnf_evaluation_cache.clear()
+                    if was_initialized:
+                        # An NNF upgrade must preserve the existing strategies'
+                        # exact input range and live candle objects.
+                        self.candles[iv] = existing
+                        if existing:
+                            self.last_tick_time[iv] = existing[-1]['time']
+                    if iv in self.nnf_candles:
+                        merged = {row['time']: row for row in self.nnf_candles[iv]}
+                        merged.update({row['time']: dict(row) for row in self.candles[iv]})
+                        self.nnf_candles[iv] = [merged[stamp] for stamp in sorted(merged)]
 
     def initialize_historical_candles(self, kite, iv):
         # Map our interval strings to Kite's historical interval strings
@@ -152,43 +181,19 @@ class SymbolData:
                 from_date = to_date - timedelta(days=30)
             else:
                 from_date = to_date - timedelta(days=4)
+            legacy_start = from_date
+            if self.history_days.get(iv):
+                from_date = min(from_date, to_date - timedelta(days=self.history_days[iv]))
                 
             if os.getenv("VERBOSE", "false").lower() == "true":
                 print(f"[HISTORICAL] Fetching {iv} data for {self.symbol}...")
-            records = history_requests.fetch(kite, self.instrument_token, from_date, to_date, kite_interval, stop=self.history_stop)
+            options = {'exchange': 'MCX'} if self.exchange == 'MCX' else {}
+            records = history_requests.fetch(kite, self.instrument_token, from_date, to_date, kite_interval, stop=self.history_stop, **options)
             
-            candles_list = []
-            session_value = 0.0
-            session_volume = 0.0
-            session_date = None
-            for r in records:
-                dt = market_datetime(r['date'])
-                
-                h, l, c = r['high'], r['low'], r['close']
-                if session_date != dt.date():
-                    session_date = dt.date()
-                    session_value = 0.0
-                    session_volume = 0.0
-                typical_price = (h + l + c) / 3.0
-                candle_volume = float(r['volume'])
-                session_value += typical_price * candle_volume
-                session_volume += candle_volume
-                # Kite historical candles do not expose exchange VWAP. This is
-                # the standard volume-weighted reconstruction for chart history;
-                # live strategy checks use Kite's exact average_price tick field.
-                historical_vwap = session_value / session_volume if session_volume else typical_price
-                
-                candles_list.append({
-                    'time': dt,
-                    'open': r['open'],
-                    'high': h,
-                    'low': l,
-                    'close': c,
-                    'volume': r['volume'],
-                    'cumulative_volume_start': 0,
-                    'cumulative_volume_end': 0,
-                    'vwap': historical_vwap
-                })
+            if from_date < legacy_start:
+                self.nnf_candles[iv] = self._history_candles(records)
+                records = [record for record in records if market_datetime(record['date']) >= legacy_start]
+            candles_list = self._history_candles(records)
             
             self.candles[iv] = candles_list
             if candles_list:
@@ -204,6 +209,24 @@ class SymbolData:
             if os.getenv("VERBOSE", "false").lower() == "true":
                 print(f"[HISTORICAL WARNING] Could not fetch history for {self.symbol} ({iv}): {e}")
                 print(f"                     Will build candles in real-time starting from first tick.")
+
+    @staticmethod
+    def _history_candles(records):
+        """Reconstruct each history range independently, including session VWAP."""
+        candles, session_date, session_value, session_volume = [], None, 0., 0.
+        for record in records:
+            stamp = market_datetime(record['date'])
+            if session_date != stamp.date():
+                session_date, session_value, session_volume = stamp.date(), 0., 0.
+            typical = (record['high'] + record['low'] + record['close']) / 3.
+            volume = float(record['volume'])
+            session_value += typical * volume
+            session_volume += volume
+            candles.append({'time': stamp,
+                **{field: record[field] for field in ('open', 'high', 'low', 'close', 'volume')},
+                'cumulative_volume_start': 0, 'cumulative_volume_end': 0,
+                'vwap': session_value / session_volume if session_volume else typical})
+        return candles
 
     def add_tick(self, tick):
         with self._lock:
@@ -226,7 +249,7 @@ class SymbolData:
 
         # Strip timezone if present
         tick_time = market_datetime(tick_time)
-        if not regular_session_tick(tick_time):
+        if not regular_session_tick(tick_time, self.exchange):
             return set()
         previous_tick = getattr(self, '_latest_exchange_time', None)
         if previous_tick is not None and tick_time < previous_tick:
@@ -305,6 +328,15 @@ class SymbolData:
                 curr_candle['volume'] = max(0, volume - start_vol)
                 curr_candle['cumulative_volume_end'] = volume
                 curr_candle['vwap'] = vwap
+            if iv in self.nnf_candles:
+                rows = self.nnf_candles[iv]
+                current = dict(self.candles[iv][-1])
+                if rows and rows[-1]['time'] == current['time']:
+                    rows[-1] = current
+                else:
+                    rows.append(current)
+                limit = 1600 if iv == '1h' else 500
+                del rows[:-limit]
         return rolled_intervals
 
     def get_latest_vwap(self, interval='5m', fallback=None):
@@ -320,11 +352,19 @@ class SymbolData:
             if iv == '4h':
                 # Resample 4-hour candles from 1-hour candles in real-time
                 df_1h = self.get_dataframe('1h')
-                return resample_candles(df_1h, '4h')
+                return resample_candles(df_1h, '4h', self.exchange)
 
             if iv not in self.candles or not self.candles[iv]:
                 return pd.DataFrame(columns=['time', 'open', 'high', 'low', 'close', 'volume', 'vwap'])
             return pd.DataFrame(list(self.candles[iv]))
+
+    def get_nnf_dataframe(self, iv):
+        with self._lock:
+            if iv == '4h':
+                return resample_candles(self.get_nnf_dataframe('1h'), '4h', self.exchange)
+            if iv in self.nnf_candles:
+                return pd.DataFrame(self.nnf_candles[iv])
+            return self.get_dataframe(iv)
 
     def _get_bucket_time(self, dt, interval):
         if interval == '1m':
@@ -340,7 +380,7 @@ class SymbolData:
             return dt.replace(minute=minute, second=0, microsecond=0)
         elif interval in ('30m', '1h', '4h'):
             # NSE hourly candles are anchored to the 09:15 session open.
-            session_open = dt.replace(hour=9, minute=15, second=0, microsecond=0)
+            session_open = session_bounds(dt, self.exchange)[0]
             elapsed_minutes = max(0, int((dt - session_open).total_seconds() // 60))
             duration = {'30m': 30, '1h': 60, '4h': 240}[interval]
             return session_open + timedelta(minutes=(elapsed_minutes // duration) * duration)
@@ -351,11 +391,15 @@ class SymbolData:
 class EvaluationSnapshot(SymbolData):
     """Private candle copies with one DataFrame construction per timeframe."""
     def __init__(self, source):
-        super().__init__(source.instrument_token, source.symbol)
+        super().__init__(source.instrument_token, source.symbol, source.instrument)
         with source._lock:
             self.candles = {iv: [dict(row) for row in rows]
                             for iv, rows in source.candles.items()}
+            self.nnf_candles = {iv: [dict(row) for row in rows]
+                                for iv, rows in source.nnf_candles.items()}
+            self._nnf_evaluation_cache = source._nnf_evaluation_cache
         self._frames = {}
+        self._nnf_frames = {}
         self._evaluation_frames = {}
         self._indicator_values = {}
 
@@ -378,6 +422,11 @@ class EvaluationSnapshot(SymbolData):
                 frame.loc[latest, 'vwap'] = vwap
             self._evaluation_frames[key] = frame
         return self._evaluation_frames[key]
+
+    def get_nnf_dataframe(self, interval):
+        if interval not in self._nnf_frames:
+            self._nnf_frames[interval] = super().get_nnf_dataframe(interval)
+        return self._nnf_frames[interval]
 
     def cached_indicator(self, key, factory):
         if key not in self._indicator_values:
@@ -465,7 +514,19 @@ class RealtimeScanner:
 
     def strategy_info(self):
         profile = self.active_strategy
-        return {key: profile[key] for key in ('id', 'name', 'version', 'threshold', 'cooldown_seconds', 'confirmation_timeframe')}
+        return {key: profile[key] for key in ('id', 'name', 'version', 'threshold', 'cooldown_seconds', 'confirmation_timeframe', 'engine', 'warnings', 'instrument_scope') if key in profile}
+
+    def profile_applies(self, profile, data):
+        if profile.get('instrument_scope') and hasattr(self, '_commodity_tokens'):
+            if data.instrument_token not in self._commodity_tokens:
+                return False
+        return applies(profile, data, getattr(self, 'config', {}).get('symbols'))
+
+    def market_is_open(self, now=None):
+        now = now or datetime.now(MARKET_TZ)
+        exchanges = {getattr(data, 'exchange', data.symbol.split(':')[0])
+                     for data in getattr(self, 'symbol_data', {}).values()} or {'NSE'}
+        return any(session_is_open(now, exchange) for exchange in exchanges)
 
     def _profile_state(self, profile):
         return self.strategy_states.setdefault(profile['id'], {
@@ -524,12 +585,17 @@ class RealtimeScanner:
     def _prepare_profile_history(self, profile):
         prepared = {}
         for token, data in self.symbol_data.items():
+            if not self.profile_applies(profile, data):
+                continue
             # Startup and activation share SymbolData. Check under its lock so
             # a switch cannot refetch intervals currently being initialized.
             with data._lock:
-                candidate = SymbolData(token, data.symbol)
+                candidate = SymbolData(token, data.symbol, data.instrument)
                 candidate.history_stop = self._stop_requested
-                candidate.check_and_add_intervals(self.kite, self._profile_intervals(profile) - data.intervals)
+                lookback = nnf_history_days(profile.get('bullish', []) + profile.get('bearish', []))
+                upgrades = {iv: days for iv, days in lookback.items() if days > data.loaded_history_days.get(iv, 0)}
+                intervals = (self._profile_intervals(profile) - data.intervals) | set(upgrades)
+                candidate.check_and_add_intervals(self.kite, intervals, history_days=upgrades)
             for interval, rows in candidate.candles.items():
                 if not rows:
                     detail = candidate.history_errors.get(interval, 'No historical candles available')
@@ -542,6 +608,15 @@ class RealtimeScanner:
         for token, candidate in prepared.items():
             data = self.symbol_data[token]
             with data._lock:
+                data.history_days.update(candidate.history_days)
+                data.loaded_history_days.update(candidate.loaded_history_days)
+                if candidate.intervals:
+                    data._nnf_evaluation_cache.clear()
+                for interval, rows in candidate.nnf_candles.items():
+                    merged = {row['time']: row for row in rows}
+                    merged.update({row['time']: row for row in data.nnf_candles.get(interval, [])})
+                    merged.update({row['time']: dict(row) for row in data.candles.get(interval, [])})
+                    data.nnf_candles[interval] = [merged[stamp] for stamp in sorted(merged)]
                 # Startup may have populated an interval while other symbols
                 # were prepared. Never replace that history or live candle state.
                 for interval in candidate.intervals - data.intervals:
@@ -613,9 +688,11 @@ class RealtimeScanner:
             with self._process_lock, self._evaluation_lock:
                 self.refresh_recording_profiles()
 
-    def get_required_intervals(self):
+    def get_required_intervals(self, data=None):
         intervals = set(BASE_TIMEFRAMES)
         profiles = getattr(self, 'recording_profiles', None)
+        if profiles is not None and data is not None:
+            profiles = {key: profile for key, profile in profiles.items() if self.profile_applies(profile, data)}
         if profiles:
             intervals.update(profile.get('confirmation_timeframe', '5m') for profile in profiles.values())
         conditions = ([condition for profile in profiles.values()
@@ -643,6 +720,10 @@ class RealtimeScanner:
         exchanges = set(sym.split(":")[0] for sym in symbols if ":" in sym)
         if not exchanges:
             exchanges = {"NSE"} # default
+        scopes = [profile['instrument_scope'] for profile in getattr(self, 'recording_profiles', {}).values()
+                  if profile.get('instrument_scope')]
+        exchanges.update(scope['exchange'] for scope in scopes)
+        self.instrument_errors = {}
 
         all_instruments = []
         for ex in exchanges:
@@ -652,6 +733,7 @@ class RealtimeScanner:
                 insts = self.kite.instruments(ex)
                 all_instruments.extend(insts)
             except Exception as e:
+                self.instrument_errors[ex] = str(e)
                 print(f"[SYSTEM WARNING] Failed to fetch instruments for {ex}: {e}")
 
         if not all_instruments:
@@ -665,6 +747,7 @@ class RealtimeScanner:
 
         # Build mapping (exchange:tradingsymbol) -> token
         mapping = {}
+        metadata = {}
         for inst in all_instruments:
             ex = inst.get("exchange")
             sym = inst.get("tradingsymbol")
@@ -672,6 +755,7 @@ class RealtimeScanner:
             if ex and sym and token:
                 mapping[f"{ex}:{sym}"] = token
                 mapping[sym] = token
+                metadata[token] = inst
 
         # Resolve requested symbols
         for sym in symbols:
@@ -682,12 +766,31 @@ class RealtimeScanner:
 
             if token:
                 self.token_to_symbol[token] = sym
-                self.symbol_data[token] = SymbolData(token, sym)
+                self.symbol_data[token] = SymbolData(token, sym, metadata.get(token))
                 self.symbol_data[token].history_stop = self._stop_requested
                 if os.getenv("VERBOSE", "false").lower() == "true":
                     print(f"[SYSTEM] Resolved {sym} -> Instrument Token: {token}")
             else:
                 print(f"[SYSTEM WARNING] Could not resolve token for symbol: {sym}")
+
+        if scopes:
+            self._commodity_tokens = set()
+            contracts = nearest_futures(all_instruments, datetime.now(MARKET_TZ).date())
+            requested = {base for scope in scopes for base in scope['underlyings']}
+            for base in sorted(requested):
+                instrument = contracts.get(base)
+                if instrument is None:
+                    self.instrument_errors[base] = 'No unexpired standard MCX future found in Kite instruments'
+                    strategy_log.warning('%s: %s; other subscriptions continue', base, self.instrument_errors[base])
+                    continue
+                token = instrument['instrument_token']
+                self._commodity_tokens.add(token)
+                symbol = 'MCX:' + instrument['tradingsymbol']
+                if token not in self.symbol_data:
+                    self.token_to_symbol[token] = symbol
+                    self.symbol_data[token] = SymbolData(token, symbol, instrument)
+                    self.symbol_data[token].history_stop = self._stop_requested
+                strategy_log.info('NNF commodity: %s | expiry=%s', symbol, instrument['expiry'])
 
         if not self.token_to_symbol:
             print("[SYSTEM ERROR] No symbols could be resolved. Exiting.")
@@ -703,7 +806,7 @@ class RealtimeScanner:
             return
         tick_time = market_datetime(tick.get('exchange_timestamp') or
                                     tick.get('timestamp') or datetime.now(MARKET_TZ))
-        if not regular_session_tick(tick_time) or not SymbolData._is_valid_price(tick.get('last_price')):
+        if not regular_session_tick(tick_time, self.symbol_data[token].exchange) or not SymbolData._is_valid_price(tick.get('last_price')):
             return
         latest = getattr(self.symbol_data[token], '_latest_exchange_time', None)
         if latest is not None and tick_time < latest:
@@ -715,7 +818,7 @@ class RealtimeScanner:
         sd = self.symbol_data[token]
         
         # Ensure intervals required by currently active conditions are initialized
-        required_intervals = self.get_required_intervals()
+        required_intervals = self.get_required_intervals(sd)
         sd.check_and_add_intervals(self.kite, required_intervals)
         
         # Add tick to compile OHLC candles
@@ -799,10 +902,18 @@ class RealtimeScanner:
             profile['version'] == self.active_strategy['version'])))
         active_event = None
         for profile in profiles:
+            if not self.profile_applies(profile, sd):
+                continue
             active = (profile['id'] == self.active_strategy['id'] and
                       profile['version'] == self.active_strategy['version'])
-            event = self._evaluate_snapshot(sd, ltp, vwap, tick_time, profile=profile,
-                                            alert=active and allow_alerts, publish=active)
+            try:
+                event = self._evaluate_snapshot(sd, ltp, vwap, tick_time, profile=profile,
+                                                alert=active and allow_alerts, publish=active)
+            except Exception as exc:
+                self.processing_error = str(exc)
+                strategy_log.exception('Strategy evaluation failed for %s [%s]; continuing other profiles',
+                                       sd.symbol, profile['id'])
+                continue
             if active:
                 active_event = event
         return active_event
@@ -810,13 +921,16 @@ class RealtimeScanner:
     def _evaluate_snapshot(self, sd, ltp, vwap, tick_time, rules=None, profile=None, alert=True, publish=True):
         token = sd.instrument_token
         profile = profile or getattr(self, 'active_strategy', None)
+        if profile and not self.profile_applies(profile, sd):
+            return None
         if profile and rules is None:
             rules = (profile['bullish'], profile['bearish'], profile['threshold'])
         bull_rules, bear_rules, threshold = rules or (
             self.bullish_conditions, self.bearish_conditions, self.alert_threshold)
 
-        bullish = evaluate_side("bullish", bull_rules, ltp, vwap, sd, threshold)
-        bearish = evaluate_side("bearish", bear_rules, ltp, vwap, sd, threshold)
+        as_of = getattr(sd, '_nnf_as_of', tick_time)
+        bullish = evaluate_side("bullish", bull_rules, ltp, vwap, sd, threshold, as_of=as_of)
+        bearish = evaluate_side("bearish", bear_rules, ltp, vwap, sd, threshold, as_of=as_of)
         bullish, bearish = resolve_direction(bullish, bearish)
         missing = missing_rule_timeframes(sd, bull_rules, bear_rules) if profile else []
         confirmation = profile.get('confirmation_timeframe', '5m') if profile else '5m'
@@ -835,6 +949,12 @@ class RealtimeScanner:
             priors = self._prior_results
         event = live_event(sd, ltp, vwap, bullish, bearish, market_time=tick_time,
                            confirmation_timeframe=confirmation)
+        details = nnf_event_details(sd, list(bull_rules) + list(bear_rules), as_of)
+        event.update(details)
+        missing = sorted(set(missing) | set(details.get('missing_timeframes', [])))
+        if missing:
+            bullish, bearish = replace(bullish, triggered=False), replace(bearish, triggered=False)
+            event.update(bullish=bullish.to_dict(), bearish=bearish.to_dict())
         event['threshold'] = threshold
         event['data_ready'] = not missing
         event['missing_timeframes'] = missing
@@ -882,7 +1002,11 @@ class RealtimeScanner:
         # Freeze the last live state as the signal for the candle that just closed.
         confirmed_signal = None
         prior = priors.get(token)
-        if (prior and prior.get('candle') and event.get('candle') and
+        if event.get('evaluation_mode') == 'closed_candle':
+            candle = event.get('candle')
+            if candle and datetime.fromtimestamp(candle['time'], MARKET_TZ).date() == tick_time.date():
+                confirmed_signal = self._confirm_once(token, event, state)
+        elif (prior and prior.get('candle') and event.get('candle') and
                 prior.get('confirmation_timeframe', '5m') == confirmation and
                 prior.get('strategy_version') == event.get('strategy_version') and
                 prior['candle']['time'] < event['candle']['time']):
@@ -971,10 +1095,18 @@ class RealtimeScanner:
             day = datetime.fromtimestamp(event['candle']['time'], MARKET_TZ).date().isoformat()
             base_charts = {tf: chart_snapshot(sd, tf, limit=600) for tf in SUPPORTED_TIMEFRAMES}
             self.history.save_charts(sd.instrument_token, day, base_charts)
+            saved = True
             for profile in (tuple(getattr(self, 'recording_profiles', {}).values()) if profiles is None else profiles):
-                self.history.save_strategy_charts(sd.instrument_token, day, profile['id'], {
-                    tf: profile_chart_snapshot(sd, tf, profile, limit=600, base=base_charts[tf]) for tf in SUPPORTED_TIMEFRAMES})
-            return True
+                if not self.profile_applies(profile, sd):
+                    continue
+                try:
+                    self.history.save_strategy_charts(sd.instrument_token, day, profile['id'], {
+                        tf: profile_chart_snapshot(sd, tf, profile, limit=600, base=base_charts[tf]) for tf in SUPPORTED_TIMEFRAMES})
+                except Exception as exc:
+                    saved = False
+                    self.history_error = str(exc)
+                    strategy_log.exception('Chart archive failed for %s [%s]; continuing other profiles', sd.symbol, profile['id'])
+            return saved
         except Exception as exc:
             self.history_error = str(exc)
             print(f'[HISTORY ERROR] {exc}')
@@ -1009,6 +1141,14 @@ class RealtimeScanner:
                 if not self._pending_archives:
                     if self._persistence_stopping.is_set():
                         return
+                    continue
+                if (not self._persistence_stopping.is_set() and
+                        (getattr(self, '_evaluation_inflight', False) or
+                         getattr(self, '_pending_evaluations', {}))):
+                    # Large chart builds contend with indicator evaluation for
+                    # Python CPU time. Let live alerts catch up before starting
+                    # the next coalesced checkpoint; recordings stay queued.
+                    self._archive_condition.wait(timeout=.05)
                     continue
                 token = next(iter(self._pending_archives))
                 sd, event, keys, profiles = self._pending_archives.pop(token)
@@ -1053,15 +1193,17 @@ class RealtimeScanner:
             self._session_close_checked = {}
         for token, data in getattr(self, 'symbol_data', {}).items():
             stamp = getattr(data, '_latest_exchange_time', None)
-            if stamp is None or now < stamp.replace(hour=15, minute=30, second=0, microsecond=0):
+            if stamp is None or now < session_bounds(stamp, data.exchange)[1]:
                 continue
             if self._session_close_checked.get(token) == stamp:
                 continue
-            profiles = tuple(getattr(self, 'recording_profiles', {}).values())
+            profiles = tuple(profile for profile in getattr(self, 'recording_profiles', {}).values()
+                             if self.profile_applies(profile, data))
             expected_time = stamp.replace(tzinfo=MARKET_TZ).isoformat()
             if profiles:
                 stale_profiles = tuple(profile for profile in profiles
-                    if self._profile_state(profile)['prior'].get(token, {}).get('market_time') != expected_time)
+                    if (self._profile_state(profile)['prior'].get(token, {}).get('market_time') != expected_time
+                        or profile.get('engine') == 'nnf'))
                 if not stale_profiles:
                     self._session_close_checked[token] = stamp
                     continue
@@ -1071,6 +1213,7 @@ class RealtimeScanner:
                     self._session_close_checked[token] = stamp
                     continue
             snapshot = EvaluationSnapshot(data)
+            snapshot._nnf_as_of = session_bounds(stamp, data.exchange)[1]
             rows = snapshot.candles.get('5m', [])
             if not rows:
                 continue
@@ -1103,7 +1246,8 @@ class RealtimeScanner:
                 if not prior.get('candle'):
                     continue
                 start = datetime.fromtimestamp(prior['candle']['time'], MARKET_TZ)
-                end = market_datetime(start).replace(hour=15, minute=30, second=0, microsecond=0)
+                data = getattr(self, 'symbol_data', {}).get(token)
+                end = session_bounds(market_datetime(start), getattr(data, 'exchange', 'NSE'))[1]
                 if now < end:
                     continue
                 signal = self._confirm_once(token, prior, state)
@@ -1120,9 +1264,7 @@ class RealtimeScanner:
     def reconnect_if_stale(self, max_age=60.0, now=None):
         """Recycle a connected Kite socket when the whole live feed goes quiet."""
         now = market_datetime(now or datetime.now(MARKET_TZ))
-        session_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
-        session_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
-        if now.weekday() >= 5 or not session_open <= now < session_close:
+        if not self.market_is_open(now):
             return False
         ticker = self.kws
         last_tick = self._last_tick_received
@@ -1223,7 +1365,7 @@ class RealtimeScanner:
         worker = getattr(self, name, None)
         return isinstance(worker, threading.Thread) and worker.is_alive()
 
-    def flush_background(self, timeout=30):
+    def flush_background(self, timeout=60):
         """Drain producers before closing their persistence consumers; bound waits."""
         deadline = time.monotonic() + timeout
         for name in ('_tick_worker', '_evaluation_worker'):
@@ -1282,7 +1424,10 @@ class RealtimeScanner:
         for index, (token, sd) in enumerate(self.symbol_data.items(), 1):
             if self._stop_requested.is_set():
                 return
-            sd.check_and_add_intervals(self.kite, required_intervals)
+            required_intervals = self.get_required_intervals(sd)
+            lookback = nnf_history_days([rule for profile in self.recording_profiles.values() if self.profile_applies(profile, sd)
+                                         for rule in profile['bullish'] + profile['bearish']])
+            sd.check_and_add_intervals(self.kite, required_intervals, history_days=lookback)
             if index % 25 == 0 or index == total:
                 strategy_log.info('History warmup progress: %d/%d symbols | requests=%d cache_hits=%d disk_hits=%d incremental=%d retries=%d',
                                   index, total, history_requests.requests, history_requests.cache_hits,

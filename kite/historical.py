@@ -50,10 +50,10 @@ class HistoricalRequests:
         elif delay > 0:
             self.sleep(delay)
 
-    def fetch(self, broker, token, start, end, interval, stop=None):
+    def fetch(self, broker, token, start, end, interval, stop=None, exchange='NSE'):
         # Group overlapping startup/activation requests made within the same
         # minute. The first response is only reused for up to 60 seconds.
-        key = (broker, token, interval, start.replace(second=0, microsecond=0),
+        key = (broker, token, interval, exchange, start.replace(second=0, microsecond=0),
                end.replace(second=0, microsecond=0))
         while not self.lock.acquire(timeout=.1):
             self._wait(0, stop)
@@ -72,7 +72,7 @@ class HistoricalRequests:
             existing = None
             now_wall = wall_time(datetime.now(TZ))
             if self.persistent_cache:
-                start, end = wall_time(start), history_end(end)
+                start, end = wall_time(start), history_end(end, exchange)
                 original_start = start
                 try:
                     existing = self.persistent_cache.load(token, interval, start, now_wall)

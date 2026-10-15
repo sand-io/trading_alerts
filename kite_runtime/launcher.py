@@ -17,7 +17,7 @@ def service_process_options():
     return {'start_new_session': True}
 
 
-def stop_services(processes):
+def stop_services(processes, timeout=10):
     for process in processes:
         if process.poll() is None:
             stop_signal = (signal.CTRL_BREAK_EVENT if sys.platform == 'win32'
@@ -28,7 +28,7 @@ def stop_services(processes):
                 # The child may have exited, or lost its Windows console.
                 if process.poll() is None:
                     process.terminate()
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + timeout
     for process in processes:
         try:
             process.wait(timeout=max(0, deadline - time.monotonic()))
@@ -82,7 +82,11 @@ def main():
     finally:
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        stop_services(processes)
+        if args.application == 'kite':
+            # Allow the dashboard's bounded 60s recording flush to finish.
+            stop_services(processes, timeout=75)
+        else:
+            stop_services(processes)
 
 
 if __name__ == '__main__':

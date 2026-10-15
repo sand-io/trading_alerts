@@ -259,6 +259,82 @@ still uses Kite authentication and symbol resolution.
 
 ### Multiple saved strategies
 
+### NNF PDF strategy (alerts only)
+
+`strategies/nnf.json` adds one multi-timeframe strategy from `nnf.pdf` to the
+strategy selector. Its 4h/1h/15m and 15m/5m/3m groups must both agree in the same
+direction. It uses a separate
+`nnf` engine so the existing default and BTST rules keep their live-candle
+semantics. Select a profile and Activate to make it the alert strategy; all
+valid profiles continue to be recorded for saved-day review.
+
+This profile uses completed candles only. Higher-timeframe filters are cut off
+at the execution candle's close, including shortened session-end candles.
+Results and confirmed states attach to the completed 3m candle immediately.
+The 15m group's completed execution conditions remain in effect until its next
+completed 15m candle; final checks use the latest completed 3m execution candle.
+The trend stage checks EMA 9/50/200 and a true Stochastic crossover, remembers
+the established EMA trend through a pullback, and requires two opposite closes
+through EMA 9 before allowing a counter-trend activation. Tangled EMA stacks
+bypass that extra filter. Bias refreshes at a completed trend bar and expires
+after one trend interval. A completed momentum RSI in the inclusive 40–60 zone
+discards bias until a new trend bar; momentum also requires EMA 9/50 alignment
+and RSI strictly above 60 or below 40. RSI's SMA 9 is a display smoothing line.
+
+Execution checks HA candle color, a true HA Close EMA 5/9 crossover, MACD
+12/26/9 calculated on HA Close, and two strictly positive/increasing histogram
+values for bullish alerts. Bearish rules mirror these with red HA candles,
+downward crosses and two negative/decreasing histogram values. The strategy
+also requires a completed 3m OBV/EMA 9 crossover and 5m Close on the appropriate
+side of VWAP, counted once each. All 16 rules per side are mandatory (100%). There is no order placement,
+position management or invented stop/target calculation.
+
+**The user explicitly confirmed the literal PDF Stochastic settings: lookback
+14, K smoothing 3, D smoothing 1. D therefore equals K, and neither bullish
+nor bearish crossover activation can occur. This profile will not generate
+alerts or BULL/BEAR arrows with those settings.** The dashboard displays this
+explanation; saved rule results and indicator studies remain available.
+
+History requests extend only the required NNF lookbacks: 21 calendar days
+of 15m candles and 240 calendar days of hourly candles for EMA 200 on the
+resampled 4h chart. NNF keeps this extra history separately: the existing
+strategies retain their original 4-day/30-day history ranges and 500-candle
+live-buffer behavior. NNF's hourly buffer retains up to 1,600 candles; its
+15m buffer retains up to 500. Both use the same received ticks. Snapshot caches reuse completed-bar
+calculations between ticks. Contracts with less available history stay
+unready until enough candles exist. Saved-session retention is unchanged.
+Recording NNF adds history/download, CPU, chart-storage and snapshot-memory
+cost even when another strategy owns alerts. A profile evaluation failure is
+logged without preventing the other profiles from evaluating.
+Chart checkpoint building waits while live evaluations are queued or in progress,
+then drains the coalesced snapshots when evaluation catches up or at shutdown.
+Event recording remains independent of chart generation.
+Shutdown allows up to 60 seconds to drain queued work. The Kite launcher waits
+up to 75 seconds before force-stopping a child, so its earlier 10-second limit
+cannot interrupt that flush. Normal shutdown returns as soon as work finishes;
+the MTF launcher's existing stop budget remains unchanged.
+NNF's `instrument_scope` selects only standard MCX `GOLD` and `CRUDEOIL`
+futures. At startup, the instrument master resolves the nearest unexpired
+contract of each underlying and adds it to the dashboard symbol search and
+Kite subscription. Mini contracts and options are excluded. Restart to resolve
+contracts again after expiry; histories stay separate by actual instrument token.
+Existing JSON condition strategies retain the symbols in `config.json`;
+the two supplemental MCX subscriptions do not expand their evaluation universe.
+With an ineligible symbol selected, the dashboard clears the condition panels
+and explains the strategy's scope. Candle charts remain available.
+NNF's extended lookbacks, evaluations and strategy chart archives are restricted
+to eligible commodities. Existing stock candle inputs and rule definitions are unchanged.
+MCX candles start at 09:00 IST. Hourly and 4h buckets, completed-bar checks,
+cache refresh, feed health and finalization use the commodity session close:
+23:30 during US daylight saving time and 23:55 otherwise. Stock sessions retain
+09:15–15:30. These are normal weekday sessions, not an exchange holiday or
+special-session calendar. Missing commodity contracts are logged and reported
+as `instrument_errors` in `/api/health`; other subscriptions continue.
+Saved selections of the initially split NNF profiles resolve to this combined
+profile on restart; previously recorded sessions retain their original strategy IDs.
+
+### JSON condition profiles
+
 The **Strategy** selector and **Activate** button switch the scanner across all
 symbols without reconnecting Kite. **Multi-Timeframe Trend Confluence** uses
 `kite/strategies/default.json`, preserving all 14 bullish and 14 bearish rules

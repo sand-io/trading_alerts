@@ -5,6 +5,7 @@ from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from market_sessions import cached_history_end
 
 TZ = ZoneInfo('Asia/Kolkata')
 
@@ -14,17 +15,9 @@ def wall_time(value):
     return stamp.astimezone(TZ).replace(tzinfo=None) if stamp.tzinfo else stamp
 
 
-def history_end(value):
+def history_end(value, exchange='NSE'):
     """Avoid redownloading an unchanged regular session overnight or at weekends."""
-    value = wall_time(value)
-    requested = value
-    opening = value.replace(hour=9, minute=15, second=0, microsecond=0)
-    if value < opening:
-        value -= timedelta(days=1)
-    while value.weekday() >= 5:
-        value -= timedelta(days=1)
-    close = value.replace(hour=15, minute=30, second=0, microsecond=0)
-    return min(requested, close)
+    return cached_history_end(wall_time(value), exchange)
 
 
 class CandleCache:
