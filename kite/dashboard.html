@@ -225,7 +225,7 @@ async function loadStrategies(){
  const data=await response.json(),picker=document.getElementById('strategyPicker');
  picker.replaceChildren(...data.profiles.map(profile=>{const option=document.createElement('option');option.value=profile.id;option.textContent=profile.name+(profile.error?' (invalid)':'');option.disabled=!!profile.error;return option}));
  picker.value=data.active.id;activeStrategyId=data.active.id;activeStrategyVersion=data.active.version;
- document.getElementById('strategyStatus').textContent='Active: '+data.active.name+' · confirmation '+(data.active.confirmation_timeframe||'5m')+(data.error?' · '+data.error:'')+(data.active.warnings?.length?' · '+data.active.warnings.join(' '):'');
+ document.getElementById('strategyStatus').textContent='Active: '+data.active.name+' · confirmation '+(data.active.confirmation_timeframe||'5m')+(data.active.alert_strategies?.length?' · Alerts enabled: '+data.active.alert_strategies.join(', '):'')+(data.error?' · '+data.error:'')+(data.active.warnings?.length?' · '+data.active.warnings.join(' '):'');
 }
 let strategyRefresh=null,strategyRefreshAgain=false,strategyRefreshTarget=null;
 function refreshStrategyState(active){

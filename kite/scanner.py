@@ -500,7 +500,9 @@ class RealtimeScanner:
         self._bind_active_state()
         self._strategy_generation = 0
         self.strategy_error = None
+        self._stock_alert_strategy_id = 'default'
         try:
+            self._stock_alert_strategy_id = self.strategy_store.stock_alert_strategy()
             selected = self.strategy_store.selected()
             if selected != 'default':
                 self.activate_strategy(selected, persist=False, source='startup restore')
@@ -514,7 +516,18 @@ class RealtimeScanner:
 
     def strategy_info(self):
         profile = self.active_strategy
-        return {key: profile[key] for key in ('id', 'name', 'version', 'threshold', 'cooldown_seconds', 'confirmation_timeframe', 'engine', 'warnings', 'instrument_scope') if key in profile}
+        info = {key: profile[key] for key in ('id', 'name', 'version', 'threshold', 'cooldown_seconds', 'confirmation_timeframe', 'engine', 'warnings', 'instrument_scope') if key in profile}
+        info['alert_strategies'] = [item['id'] for item in self.recording_profiles.values()
+                                    if self._profile_alerts_enabled(item)]
+        return info
+
+    def _profile_alerts_enabled(self, profile):
+        current = self.recording_profiles.get(profile['id'])
+        if current is None or current['version'] != profile['version']:
+            return False
+        stock_id = (getattr(self, '_stock_alert_strategy_id', 'default')
+                    if self.active_strategy.get('engine') == 'nnf' else self.active_strategy['id'])
+        return profile.get('engine') == 'nnf' or profile['id'] == stock_id
 
     def profile_applies(self, profile, data):
         if profile.get('instrument_scope') and hasattr(self, '_commodity_tokens'):
@@ -631,15 +644,18 @@ class RealtimeScanner:
         with self._process_lock, self._evaluation_lock:
             profile = self.strategy_store.load(strategy_id)
             previous = self.active_strategy
+            stock_id = (getattr(self, '_stock_alert_strategy_id', 'default')
+                        if profile.get('engine') == 'nnf' else profile['id'])
             if profile['id'] == previous['id'] and profile['version'] == previous['version']:
                 if persist:
-                    self.strategy_store.save_selection(strategy_id)
+                    self.strategy_store.save_selection(strategy_id, stock_alert_strategy=stock_id)
                 return self.strategy_info()
             prepared = self._prepare_profile_history(profile)
             if persist:
-                self.strategy_store.save_selection(strategy_id)
+                self.strategy_store.save_selection(strategy_id, stock_alert_strategy=stock_id)
             self._merge_profile_history(prepared)
             self.active_strategy = profile
+            self._stock_alert_strategy_id = stock_id
             self.recording_profiles[profile['id']] = profile
             self._strategy_generation += 1
             self.bullish_conditions = profile['bullish']
@@ -908,7 +924,7 @@ class RealtimeScanner:
                       profile['version'] == self.active_strategy['version'])
             try:
                 event = self._evaluate_snapshot(sd, ltp, vwap, tick_time, profile=profile,
-                                                alert=active and allow_alerts, publish=active)
+                                                alert=self._profile_alerts_enabled(profile) and allow_alerts, publish=active)
             except Exception as exc:
                 self.processing_error = str(exc)
                 strategy_log.exception('Strategy evaluation failed for %s [%s]; continuing other profiles',

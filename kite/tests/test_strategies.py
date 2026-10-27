@@ -58,6 +58,24 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(scanner._strategy_generation, generation)
         self.assertEqual(self.store.selected(), 'trend')
 
+    def test_nnf_view_preserves_stock_alert_strategy_across_restart(self):
+        source = Path(__file__).resolve().parents[1] / 'strategies' / 'nnf.json'
+        (self.root / 'strategies' / 'nnf.json').write_text(source.read_text())
+        scanner = self.scanner()
+        scanner.activate_strategy('trend')
+        scanner.activate_strategy('nnf')
+        self.assertEqual(set(scanner.strategy_info()['alert_strategies']), {'trend', 'nnf'})
+        self.assertEqual(self.store.stock_alert_strategy(), 'trend')
+        restored = self.scanner()
+        self.assertEqual(restored.active_strategy['id'], 'nnf')
+        self.assertEqual(set(restored.strategy_info()['alert_strategies']), {'trend', 'nnf'})
+        restored.activate_strategy('default')
+        self.assertEqual(set(restored.strategy_info()['alert_strategies']), {'default', 'nnf'})
+
+    def test_legacy_nnf_selection_retains_default_stock_alerts(self):
+        self.store.save_selection('nnf')
+        self.assertEqual(self.store.stock_alert_strategy(), 'default')
+
     def test_missing_history_allows_activation_and_preserves_existing_candles(self):
         scanner = self.scanner()
         data = SymbolData(1, 'NFO:ICICIGI26OCTFUT')

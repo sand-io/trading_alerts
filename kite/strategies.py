@@ -36,10 +36,20 @@ class StrategyStore:
             return selected
         return 'default'
 
-    def save_selection(self, strategy_id):
+    def stock_alert_strategy(self):
+        if not self.selection.exists():
+            return 'default'
+        saved = json.loads(self.selection.read_text())
+        identifier = saved.get('stock_alert_strategy', saved.get('id', 'default'))
+        return 'default' if identifier in ('nnf', 'nnf_4h_1h_15m', 'nnf_15m_5m_3m') else identifier
+
+    def save_selection(self, strategy_id, stock_alert_strategy=None):
         self.selection.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.selection.with_suffix('.tmp')
-        temporary.write_text(json.dumps({'id': strategy_id}))
+        payload = {'id': strategy_id}
+        if stock_alert_strategy is not None:
+            payload['stock_alert_strategy'] = stock_alert_strategy
+        temporary.write_text(json.dumps(payload))
         temporary.replace(self.selection)
 
     def load(self, strategy_id):

@@ -1,4 +1,4 @@
-"""Record all profiles while only the selected profile may notify."""
+"""Record all profiles; preserve stock alert ownership alongside NNF."""
 import json
 import tempfile
 import threading
@@ -82,6 +82,25 @@ class AllStrategyRecordingTests(unittest.TestCase):
         for identifier in ('default', 'second'):
             self.assertEqual(len(self.scanner.history.events(1, self.day, 'evaluation', identifier)), 1)
         self.assertEqual(self.scanner.processing_error, 'NNF evaluation failure')
+
+    def test_background_nnf_notifies_without_changing_selected_stock_panel(self):
+        # Use a passing synthetic rule to exercise delivery independently of
+        # the deliberately non-signalling literal PDF Stochastic settings.
+        second = self.scanner.recording_profiles['second']
+        nnf = {**second, 'id': 'nnf', 'engine': 'nnf'}
+        self.scanner.recording_profiles['nnf'] = nnf
+        with patch('scanner.notifier.send_alert', return_value=True) as notify:
+            event = self.evaluate()
+        self.assertEqual(notify.call_count, 2)
+        self.assertEqual({call.kwargs['cooldown_key'].split(':')[0] for call in notify.call_args_list},
+                         {'default', 'nnf'})
+        self.assertEqual(event['strategy_id'], 'default')
+        self.scanner.event_callback.assert_called_once()
+        for identifier in ('default', 'nnf'):
+            saved = self.scanner.history.events(1, self.day, 'alert', identifier)
+            self.assertEqual(len(saved), 1)
+            self.assertTrue(saved[0]['alerts_enabled'])
+        self.assertEqual(self.scanner.history.events(1, self.day, 'alert', 'second'), [])
 
     def test_failed_nnf_chart_does_not_stop_legacy_chart_recordings(self):
         active = self.scanner.active_strategy

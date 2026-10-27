@@ -67,8 +67,29 @@ class CommodityScopeTests(unittest.TestCase):
             calls = self.scanner._evaluate_snapshot.call_args_list
             self.assertEqual([call.kwargs['profile']['id'] for call in calls], expected)
             for call in calls:
-                self.assertEqual(call.kwargs['alert'], call.kwargs['profile']['id'] == active)
-                self.assertEqual(call.kwargs['publish'], call.kwargs['alert'])
+                identifier = call.kwargs['profile']['id']
+                self.assertEqual(call.kwargs['alert'], identifier in ('nnf', active if active != 'nnf' else 'default'))
+                self.assertEqual(call.kwargs['publish'], identifier == active)
+
+    def test_btst_alert_selection_survives_viewing_nnf_and_suppresses_default(self):
+        self.scanner.active_strategy = self.profiles['nnf']
+        self.scanner._stock_alert_strategy_id = 'btst_setup'
+        self.scanner._evaluate_snapshot = Mock(return_value={'ok': True})
+        for data in (self.stock, self.gold, self.crude):
+            self.scanner._evaluate_all_snapshot(data, 100, 99, datetime(2026, 10, 14, 12))
+        calls = self.scanner._evaluate_snapshot.call_args_list
+        self.assertEqual([call.kwargs['profile']['id'] for call in calls if call.kwargs['alert']],
+                         ['btst_setup', 'nnf', 'nnf'])
+        self.scanner._evaluate_snapshot.reset_mock()
+        for data in (self.stock, self.gold):
+            self.scanner._evaluate_all_snapshot(data, 100, 99, datetime(2026, 10, 14, 12), allow_alerts=False)
+        self.assertTrue(all(not call.kwargs['alert'] for call in self.scanner._evaluate_snapshot.call_args_list))
+
+    def test_outdated_background_nnf_profile_cannot_alert(self):
+        old = {**self.profiles['nnf'], 'version': 'old'}
+        self.scanner._evaluate_snapshot = Mock(return_value={'ok': True})
+        self.scanner._evaluate_all_snapshot(self.gold, 100, 99, datetime(2026, 10, 14, 12), profiles=(old,))
+        self.assertFalse(self.scanner._evaluate_snapshot.call_args.kwargs['alert'])
 
     def test_extra_lookback_warms_only_commodities_and_copies_metadata(self):
         with patch.object(SymbolData, 'check_and_add_intervals', autospec=True) as warm:
