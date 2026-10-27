@@ -38,7 +38,7 @@ graph TD
    * `4h` candles are resampled on-the-fly using `1h` candles.
 5. **Grouped Condition Evaluation:** 
    * Every incoming tick updates candle OHLC and volume on the ingestion worker. Live chart events are published at most once per second per symbol (and immediately at candle rollover).
-   * A separate worker evaluates all valid JSON strategies against shared private candle snapshots. Only the active strategy sends alerts. Provisional evaluations for the same symbol/candle are combined; final snapshots from earlier candles are retained. The rule panel displays the evaluation timestamp separately from the latest market update.
+   * A separate worker evaluates all valid JSON strategies against shared private candle snapshots. The selected stock strategy and NNF can send alerts independently. Provisional evaluations for the same symbol/candle are combined; final snapshots from earlier candles are retained. The rule panel displays the evaluation timestamp separately from the latest market update.
    * Desktop alerts are suppressed for evaluations more than ten seconds behind exchange time. The health endpoint reports pending tick batches and evaluations for monitoring processing load.
    * It counts the percentage of rules that evaluate to `True`.
 6. **Threshold-Based Alerts:** 
@@ -265,8 +265,12 @@ still uses Kite authentication and symbol resolution.
 strategy selector. Its 4h/1h/15m and 15m/5m/3m groups must both agree in the same
 direction. It uses a separate
 `nnf` engine so the existing default and BTST rules keep their live-candle
-semantics. Select a profile and Activate to make it the alert strategy; all
-valid profiles continue to be recorded for saved-day review.
+semantics. NNF is enabled for commodity alerts alongside the selected stock
+strategy. Viewing/activating NNF preserves the last selected Default or BTST
+stock alert strategy across restarts; older NNF-only selections use Default.
+The dashboard status lists enabled alert strategy IDs. Only the viewed strategy
+publishes live rule panels; all valid profiles continue to be recorded for
+saved-day review. Each profile retains its own cooldown keys and rule threshold.
 
 This profile uses completed candles only. Higher-timeframe filters are cut off
 at the execution candle's close, including shortened session-end candles.
@@ -276,7 +280,12 @@ completed 15m candle; final checks use the latest completed 3m execution candle.
 The trend stage checks EMA 9/50/200 and a true Stochastic crossover, remembers
 the established EMA trend through a pullback, and requires two opposite closes
 through EMA 9 before allowing a counter-trend activation. Tangled EMA stacks
-bypass that extra filter. Bias refreshes at a completed trend bar and expires
+bypass that extra filter. A counter-trend Stochastic crossover on the first
+opposite close is retained until the second consecutive opposite close; it does
+not require a second crossover. Price recovery through EMA 9, loss of the
+Stochastic direction, missing indicator values, or a tangled EMA stack cancels
+the pending crossover. Once confirmed, it is consumed rather than reactivated
+on subsequent bars without a new crossover. Bias refreshes at a completed trend bar and expires
 after one trend interval. A completed momentum RSI in the inclusive 40–60 zone
 discards bias until a new trend bar; momentum also requires EMA 9/50 alignment
 and RSI strictly above 60 or below 40. RSI's SMA 9 is a display smoothing line.
@@ -304,7 +313,7 @@ live-buffer behavior. NNF's hourly buffer retains up to 1,600 candles; its
 calculations between ticks. Contracts with less available history stay
 unready until enough candles exist. Saved-session retention is unchanged.
 Recording NNF adds history/download, CPU, chart-storage and snapshot-memory
-cost even when another strategy owns alerts. A profile evaluation failure is
+cost alongside the selected stock strategy. A profile evaluation failure is
 logged without preventing the other profiles from evaluating.
 Chart checkpoint building waits while live evaluations are queued or in progress,
 then drains the coalesced snapshots when evaluation catches up or at shutdown.
@@ -368,8 +377,8 @@ evaluation while preserving the feed connection. Cooldowns default to `config.js
 when omitted and are isolated by strategy and rule version. Files are checked every
 five seconds on incoming ticks; invalid edits retain the last working rules.
 
-This version evaluates and records all valid strategies across all symbols. Only
-the active strategy sends alerts. Live charts retain the standard studies; saved
+This version evaluates and records valid strategies on their eligible symbols.
+The selected stock strategy and NNF have independent alert delivery. Live charts retain the standard studies; saved
 review uses each strategy's recorded indicators. Confirmed markers use 5-minute
 candle rollover. Other
 custom Python evaluators and a visual rule editor are not
@@ -424,7 +433,7 @@ loads that strategy's saved evaluations, alerts, bull/bear markers and indicator
 series. It does not activate the strategy. The list comes from recorded data, so
 profiles deleted from the strategy directory remain reviewable. Neutral confirmed
 states are also retained; a neutral state has no directional marker. The alert list
-contains only alerts actually accepted while that strategy was active.
+contains only alerts actually accepted while that strategy had alerts enabled.
 
 Saved indicators reflect each profile's configured periods: for example, BTST
 includes EMA(10), daily RSI with its band levels, hourly MACD(12,26,9), OBV with
