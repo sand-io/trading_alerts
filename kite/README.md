@@ -225,6 +225,16 @@ The dashboard also supports a 3-minute chart with EMA 20/50 and optional VWAP, u
 
 ### Saved session review (SQLite)
 
+Desktop notifications identify the direction, exact trading symbol and strategy
+ID in the title. Their body includes the strategy name, current price in INR,
+VWAP when available, passing/total rules, score and required threshold,
+confirmation timeframe, and IST signal/exchange time and candle start.
+Live evaluations are labelled provisional. Closed-candle alerts separately show
+the signal candle's close time and close price, which can differ from current LTP.
+The terminal includes the full passing-rule details. Each accepted saved alert
+also retains the exact notification title and body; desktop display length varies
+by operating system. Existing cooldowns, alert ownership and strategy rules apply.
+
 The scanner now records live rule evaluations for every loaded valid strategy
 (normally every five seconds per symbol), alerts accepted by the notifier after cooldown, and confirmed 5-minute
 candle states in `kite/data/history.sqlite3`. Each evaluation saves its rule texts,
@@ -329,6 +339,11 @@ Kite subscription. Mini contracts and options are excluded. Restart to resolve
 contracts again after expiry; histories stay separate by actual instrument token.
 Existing JSON condition strategies retain the symbols in `config.json`;
 the two supplemental MCX subscriptions do not expand their evaluation universe.
+The symbol picker follows the active strategy: NNF shows only the resolved
+Gold and Crude contracts, while Default/BTST show their configured watchlist.
+Switching strategies refreshes the list and replaces an ineligible selection.
+If commodity resolution fails, NNF shows an empty list rather than stock symbols.
+Stock subscriptions and background alerts continue while NNF is displayed.
 With an ineligible symbol selected, the dashboard clears the condition panels
 and explains the strategy's scope. Candle charts remain available.
 NNF's extended lookbacks, evaluations and strategy chart archives are restricted
