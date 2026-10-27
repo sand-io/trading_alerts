@@ -52,6 +52,8 @@ graph TD
 
 ## File Structure
 
+* **`frontend/`**: Browser pages, styles and scripts: `dashboard.html` for the live chart and `alerts.html` for daily alerts. FastAPI serves them at `/` and `/alerts`; no separate frontend server or build step is required.
+* **`dashboard.py`**: FastAPI backend, HTTP/WebSocket routes and frontend page serving.
 * **`scanner.py`**: The central daemon process that connects to the WebSocket feed, manages historical data, aggregates candles, and runs the evaluation loop.
 * **`conditions.py`**: Contains indicators utilizing `ta-lib` (e.g., MACD, RSI, ADX, Heikin-Ashi) and contains the natural-language condition parsers.
 * **`notifier.py`**: Handles alert throttling (cooldowns) and triggers terminal printouts and macOS desktop notifications.
@@ -293,8 +295,8 @@ still uses Kite authentication and symbol resolution.
 ### NNF PDF strategy (alerts only)
 
 `strategies/nnf.json` adds one multi-timeframe strategy from `nnf.pdf` to the
-strategy selector. Its 4h/1h/15m and 15m/5m/3m groups must both agree in the same
-direction. It uses a separate
+strategy selector. At 100%, its 4h/1h/15m and 15m/5m/3m groups must both agree
+in the same direction and pass every rule. It uses a separate
 `nnf` engine so the existing default and BTST rules keep their live-candle
 semantics. NNF is enabled for commodity alerts alongside the selected stock
 strategy. Viewing/activating NNF preserves the last selected Default or BTST
@@ -326,13 +328,26 @@ Execution checks HA candle color, a true HA Close EMA 5/9 crossover, MACD
 values for bullish alerts. Bearish rules mirror these with red HA candles,
 downward crosses and two negative/decreasing histogram values. The strategy
 also requires a completed 3m OBV/EMA 9 crossover and 5m Close on the appropriate
-side of VWAP, counted once each. All 16 rules per side are mandatory (100%). There is no order placement,
+side of VWAP, counted once each. All 16 rules per side are mandatory at 100%.
+The JSON `threshold` accepts any finite percentage greater than 0 and at most
+100, just like other profiles. For 16 equally weighted rules, 50% requires 8,
+60% requires 10, and 80% requires 13 passing rules. Lower values select partial
+matches and can bypass any individual gate, including trend bias or a timeframe
+group's filters; they are not the strict PDF workflow. The dashboard displays a
+partial-match warning. Data readiness, closed-candle timing, commodity scope,
+direction conflict resolution and cooldowns still apply. There is no order placement,
 position management or invented stop/target calculation.
+NNF suppresses directional matches when the latest completed execution candle
+is at least one confirmation interval old, including the previous session's
+candle before the first new 3m close. Session finalization uses the session-close
+timestamp. Reloading an NNF threshold preserves queued stock alerts; obsolete
+NNF profile versions cannot notify after the reload.
 
 **The user explicitly confirmed the literal PDF Stochastic settings: lookback
 14, K smoothing 3, D smoothing 1. D therefore equals K, and neither bullish
-nor bearish crossover activation can occur. This profile will not generate
-alerts or BULL/BEAR arrows with those settings.** The dashboard displays this
+nor bearish crossover activation can occur. At 100%, this profile cannot generate
+alerts or BULL/BEAR arrows. Lower thresholds may produce partial-match alerts
+without crossover activation.** The dashboard displays this
 explanation; saved rule results and indicator studies remain available.
 
 History requests extend only the required NNF lookbacks: 21 calendar days
