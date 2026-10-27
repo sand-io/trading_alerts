@@ -99,7 +99,7 @@ class StrategyStore:
         warnings = [WARNING] if engine == 'nnf' else []
         if engine == 'nnf' and threshold < 100:
             warnings.append('Partial-match NNF: alerts use the configured percentage of rules; '
-                            'trend bias and individual PDF filters may fail. This is not the strict PDF workflow.')
+                            'trend bias and individual filters may fail. This is not the strict workflow.')
         return {'id': strategy_id, 'name': name, 'threshold': threshold,
                 'engine': engine, 'warnings': warnings,
                 'instrument_scope': scope,
