@@ -1,7 +1,7 @@
 // Run: node kite/tests/test_daily_alerts_ui.js
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
-const html=fs.readFileSync(`${__dirname}/../alerts.html`,'utf8');
-const mainHtml=fs.readFileSync(`${__dirname}/../dashboard.html`,'utf8');
+const html=fs.readFileSync(`${__dirname}/../frontend/alerts.html`,'utf8');
+const mainHtml=fs.readFileSync(`${__dirname}/../frontend/dashboard.html`,'utf8');
 function node(){return {children:[],value:'',textContent:'',hidden:false,append(...items){this.children.push(...items)},replaceChildren(...items){this.children=items}}}
 const nodes=new Map(),document={getElementById(id){if(!nodes.has(id))nodes.set(id,node());return nodes.get(id)},createElement:node};
 const ctx=vm.createContext({document,URLSearchParams,Intl,Date,console,fetch:()=>new Promise(()=>{})});

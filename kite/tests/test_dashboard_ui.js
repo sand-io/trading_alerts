@@ -1,6 +1,6 @@
 // Run: node kite/tests/test_dashboard_ui.js
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
-const html=fs.readFileSync(`${__dirname}/../dashboard.html`,'utf8');
+const html=fs.readFileSync(`${__dirname}/../frontend/dashboard.html`,'utf8');
 new vm.Script(html.split('<script>')[1].split('</script>')[0]);
 const series=[],scales=new Map();
 const chart={addLineSeries(options){const line={options,applyOptions(value){Object.assign(this.options,value)},setData(points){this.points=points},update(point){this.points??=[];assert.ok(!this.points.length||point.time>=this.points.at(-1).time,'series updates must be chronological');if(this.points.at(-1)?.time===point.time)this.points[this.points.length-1]=point;else this.points.push(point)},createPriceLine(options){return {options,applyOptions(value){Object.assign(this.options,value)}}},removePriceLine(){}};series.push(line);return line},priceScale(id){return {applyOptions(options){scales.set(id,options)}}}};
@@ -406,6 +406,10 @@ function testLiveRuleDelivery(){
  assert.ok(liveNodes.get('strategyContext').textContent.includes('Completed candle rules as of'));
  assert.ok(liveNodes.get('strategyContext').textContent.includes('K equals D'));
  assert.ok(!liveNodes.get('strategyContext').textContent.includes('may be provisional'));
+ clients[0].onmessage({data:JSON.stringify({...nnfEvent,signal_stale:true})});
+ assert.ok(liveNodes.get('strategyContext').textContent.includes('Waiting for a newly completed 3m candle'));
+ clients[0].onmessage({data:JSON.stringify({...nnfEvent,signal_stale:true,data_ready:false,missing_timeframes:['1h']})});
+ assert.ok(liveNodes.get('strategyContext').textContent.includes('Waiting for candle data: 1h'));
  console.log('WebSocket rule ticks/crosses update despite chart failures; review and symbol isolation passed');
 }
 testLiveRuleDelivery();

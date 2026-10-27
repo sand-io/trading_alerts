@@ -21,6 +21,7 @@ from strategy_runtime import SUPPORTED_TIMEFRAMES, chart_snapshot, live_study_va
 
 
 KITE_DIR = Path(__file__).resolve().parent
+FRONTEND_DIR = KITE_DIR / 'frontend'
 
 
 class LiveBridge:
@@ -207,7 +208,7 @@ app = FastAPI(title="Kite Strategy Dashboard", version="1.0.0", lifespan=lifespa
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard_page():
-    return FileResponse(KITE_DIR / "dashboard.html", media_type="text/html")
+    return FileResponse(FRONTEND_DIR / "dashboard.html", media_type="text/html")
 
 
 @app.get("/api/health")
@@ -241,7 +242,7 @@ def strategies():
 
 @app.get('/alerts', response_class=HTMLResponse)
 def alerts_window():
-    return FileResponse(KITE_DIR / 'alerts.html', media_type='text/html')
+    return FileResponse(FRONTEND_DIR / 'alerts.html', media_type='text/html')
 
 
 @app.get('/api/alerts/dates')
