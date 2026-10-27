@@ -225,10 +225,11 @@ The dashboard also supports a 3-minute chart with EMA 20/50 and optional VWAP, u
 
 ### Saved session review (SQLite)
 
-Desktop notifications identify the direction, exact trading symbol and strategy
-ID in the title. Their body includes the strategy name, current price in INR,
-VWAP when available, passing/total rules, score and required threshold,
-confirmation timeframe, and IST signal/exchange time and candle start.
+Desktop notifications use a green 🟢 bullish or red 🔴 bearish signal and the
+exact trading symbol in the title. Their compact body shows the strategy name,
+price in INR, passing/total rules, score and threshold, timeframe, and IST time.
+Strategy ID, VWAP, full date and candle start remain in terminal output and
+the saved notification's `details` field.
 Live evaluations are labelled provisional. Closed-candle alerts separately show
 the signal candle's close time and close price, which can differ from current LTP.
 The terminal includes the full passing-rule details. Each accepted saved alert

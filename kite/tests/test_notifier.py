@@ -16,24 +16,28 @@ class AlertFormatTests(unittest.TestCase):
 
     def test_live_alert_identifies_strategy_and_exchange_time_without_claiming_confirmation(self):
         alert = format_alert('NFO:TEST26OCTFUT', True, 'rules', 100.5, self.context())
-        self.assertIn('BULLISH | NFO:TEST26OCTFUT', alert['title'])
-        self.assertIn('btst_setup', alert['title'])
-        self.assertIn('Strategy: BTST Daily-Hourly Confluence [btst_setup]', alert['message'])
+        self.assertEqual(alert['title'], '🟢 BULLISH Alert: NFO:TEST26OCTFUT')
+        self.assertIn('Strategy: BTST Daily-Hourly Confluence [btst_setup]', alert['details'])
         for detail in ('INR 100.50', 'VWAP: 99.25', '7/7 (100.0%)', 'Required: 100%',
                        '5m confirmation | Live / provisional', '27 Oct 2026 10:00:12 IST', 'Candle start:'):
-            self.assertIn(detail, alert['message'])
+            self.assertIn(detail, alert['details'])
+        self.assertEqual(len(alert['message'].splitlines()), 4)
+        self.assertIn('5m · Live / provisional · 10:00:12 IST', alert['message'])
+        self.assertNotIn('btst_setup', alert['message'])
+        self.assertNotIn('Candle start:', alert['message'])
         self.assertNotIn('Signal close:', alert['message'])
 
     def test_closed_alert_distinguishes_signal_price_and_close_from_current_ltp(self):
         context = {**self.context(), 'evaluation_mode': 'closed_candle',
                    'as_of': 1793075580, 'confirmation_timeframe': '3m'}
         alert = format_alert('MCX:GOLD26DECFUT', False, 'rules', 101.5, context)
-        self.assertIn('BEARISH', alert['title'])
+        self.assertEqual(alert['title'], '🔴 BEARISH Alert: MCX:GOLD26DECFUT')
         self.assertIn('6/7 (85.7%)', alert['message'])
-        self.assertIn('3m confirmation | Closed candle', alert['message'])
-        self.assertIn('Signal close:', alert['message'])
+        self.assertIn('3m · Closed candle', alert['message'])
+        self.assertIn('Signal close:', alert['details'])
         self.assertIn('LTP: INR 101.50', alert['message'])
-        self.assertIn('Signal close price: INR 100.00', alert['message'])
+        self.assertIn('Close: INR 100.00', alert['message'])
+        self.assertIn('Signal close price: INR 100.00', alert['details'])
 
     def test_structured_notification_keeps_stable_strategy_cooldown(self):
         notifier = Notifier()

@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import queue
 import threading
+import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -19,7 +20,8 @@ def format_alert(symbol, is_bullish, condition_str, price, context=None):
     strategy = context.get('strategy_name') or 'Kite Scanner'
     identifier = context.get('strategy_id')
     strategy_label = f'{strategy} [{identifier}]' if identifier else strategy
-    title = f'{side.upper()} | {symbol} | {identifier or strategy}'
+    signal = '🟢' if is_bullish else '🔴'
+    title = f'{signal} {side.upper()} Alert: {symbol}'
     price_line = f'LTP: INR {float(price):,.2f}'
     if context.get('vwap') is not None:
         price_line += f" | VWAP: {float(context['vwap']):,.2f}"
@@ -49,7 +51,19 @@ def format_alert(symbol, is_bullish, condition_str, price, context=None):
         lines.append(f"Candle start: {timestamp(context['candle']['time'])}")
     if closed and context.get('candle'):
         lines.append(f"Signal close price: INR {context['candle']['close']:,.2f}")
-    return {'title': title, 'message': '\n'.join(lines)}
+    # Keep the desktop card short; retain all audit details separately.
+    compact_price = f'LTP: INR {float(price):,.2f}'
+    if closed and context.get('candle'):
+        compact_price = f"Close: INR {context['candle']['close']:,.2f} | {compact_price}"
+    compact = [f'Strategy: {strategy}', compact_price, lines[2]]
+    timing = []
+    if context.get('confirmation_timeframe'):
+        timing.extend([context['confirmation_timeframe'], 'Closed candle' if closed else 'Live / provisional'])
+    if signal_time is not None:
+        timing.append(timestamp(signal_time).split(' ', 3)[-1])
+    if timing:
+        compact.append(' · '.join(timing))
+    return {'title': title, 'message': '\n'.join(compact), 'details': '\n'.join(lines)}
 
 
 CONFIG_FILE = "config.json"
@@ -113,8 +127,12 @@ class Notifier:
 
         notification = notification or format_alert(symbol, is_bullish, condition_str, price)
         title, message = notification['title'], notification['message']
-        print(f"\n[{datetime.now(IST):%Y-%m-%d %H:%M:%S} IST] {title}")
-        print(message)
+        heading = f'[{datetime.now(IST):%Y-%m-%d %H:%M:%S} IST] {title}'
+        if sys.stdout.isatty():
+            color = '\033[92m' if is_bullish else '\033[91m'
+            heading = f'{color}{heading}\033[0m'
+        print(f'\n{heading}')
+        print(notification.get('details', message))
         print(f"Rule details:\n{condition_str}")
 
         if self._desktop_worker is not None and self._desktop_worker.is_alive():
