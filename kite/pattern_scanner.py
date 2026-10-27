@@ -12,7 +12,7 @@ from kiteconnect import KiteConnect
 # Import pattern recognition logic
 from patternsdetect.patterns import detect_all_patterns
 # Import cross-platform notifier
-from notifier import notifier
+from notifier import notifier, format_alert
 
 CONFIG_FILE = "config.json"
 ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
@@ -171,7 +171,10 @@ def run_pattern_scanner():
                     is_bullish=is_bullish,
                     condition_str=detail_str,
                     price=last_price,
-                    cooldown_key=f"pattern_{pattern_name}"
+                    cooldown_key=f"pattern_{pattern_name}",
+                    notification=format_alert(symbol, is_bullish, detail_str, last_price,
+                                              {'strategy_name': f'Chart Pattern Scanner — {pattern_name}',
+                                               'strategy_id': 'pattern_scanner'})
                 )
                 
         except Exception as e:

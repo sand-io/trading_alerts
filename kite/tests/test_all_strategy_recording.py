@@ -60,6 +60,10 @@ class AllStrategyRecordingTests(unittest.TestCase):
             self.assertEqual(events[0]['alerts_enabled'], identifier == 'default')
         self.assertEqual(event['strategy_id'], 'default')
         self.assertEqual(len(store.events(1, self.day, 'alert')), 1)
+        saved_alert = store.events(1, self.day, 'alert')[0]
+        self.assertEqual(saved_alert['notification'], notify.call_args.kwargs['notification'])
+        self.assertIn('Strategy: Default [default]', saved_alert['notification']['message'])
+        self.assertIn('Live / provisional', saved_alert['notification']['message'])
         self.scanner.event_callback.assert_called_once()
         self.assertEqual(self.scanner.event_callback.call_args.args[0]['strategy_id'], 'default')
 

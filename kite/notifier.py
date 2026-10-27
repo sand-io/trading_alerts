@@ -7,6 +7,49 @@ import subprocess
 import queue
 import threading
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo('Asia/Kolkata')
+
+
+def format_alert(symbol, is_bullish, condition_str, price, context=None):
+    """Build a shared notification for desktop delivery and saved history."""
+    context = context or {}
+    side = 'bullish' if is_bullish else 'bearish'
+    strategy = context.get('strategy_name') or 'Kite Scanner'
+    identifier = context.get('strategy_id')
+    strategy_label = f'{strategy} [{identifier}]' if identifier else strategy
+    title = f'{side.upper()} | {symbol} | {identifier or strategy}'
+    price_line = f'LTP: INR {float(price):,.2f}'
+    if context.get('vwap') is not None:
+        price_line += f" | VWAP: {float(context['vwap']):,.2f}"
+    lines = [f'Strategy: {strategy_label}', price_line]
+    result = context.get(side)
+    if result:
+        lines.append(f"Rules: {result['passed']}/{result['total']} ({result['percentage']:.1f}%)"
+                     f" | Required: {context['threshold']:g}%")
+    else:
+        lines.append(condition_str.split('\n')[0])
+    closed = context.get('evaluation_mode') == 'closed_candle'
+    if context.get('confirmation_timeframe'):
+        mode = 'Closed candle' if closed else 'Live / provisional'
+        lines.append(f"{context['confirmation_timeframe']} confirmation | {mode}")
+    def timestamp(value):
+        if isinstance(value, (int, float)):
+            stamp = datetime.fromtimestamp(value, IST)
+        else:
+            stamp = datetime.fromisoformat(value)
+            stamp = stamp.replace(tzinfo=IST) if stamp.tzinfo is None else stamp.astimezone(IST)
+        return stamp.strftime('%d %b %Y %H:%M:%S IST')
+    signal_time = context.get('as_of') if closed else context.get('market_time')
+    if signal_time is not None:
+        label = 'Signal close' if closed else 'Exchange time'
+        lines.append(f'{label}: {timestamp(signal_time)}')
+    if context.get('candle'):
+        lines.append(f"Candle start: {timestamp(context['candle']['time'])}")
+    if closed and context.get('candle'):
+        lines.append(f"Signal close price: INR {context['candle']['close']:,.2f}")
+    return {'title': title, 'message': '\n'.join(lines)}
 
 
 CONFIG_FILE = "config.json"
@@ -52,7 +95,7 @@ class Notifier:
             except Exception:
                 pass
 
-    def send_alert(self, symbol, is_bullish, condition_str, price, cooldown_key=None):
+    def send_alert(self, symbol, is_bullish, condition_str, price, cooldown_key=None, notification=None):
         current_time = time.time()
         # Use custom cooldown_key if provided to prevent key variation (e.g. changing sub-condition count) from resetting the cooldown
         key = cooldown_key if cooldown_key is not None else condition_str
@@ -68,21 +111,11 @@ class Notifier:
         # Update last alert time
         self.last_alert_times[alert_key] = current_time
 
-        # Format details
-        direction = "BULLISH 🟢" if is_bullish else "BEARISH 🔴"
-        title = f"{direction} Alert: {symbol}"
-        
-        # If condition_str is multiline, make a clean single line for the macOS notification bubble
-        first_line = condition_str.split('\n')[0]
-        message = f"Price: {price} | Condition: {first_line}"
-        timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        # Print to terminal with clean, vibrant formatting
-        color_code = "\033[92m" if is_bullish else "\033[91m"  # Green or Red
-        reset_code = "\033[0m"
-        print(f"\n[{timestamp_str}] {color_code}ALERT: {symbol} is {direction}!{reset_code}")
-        print(f"  └─ Condition: '{condition_str}'")
-        print(f"  └─ Current Price: {price}")
+        notification = notification or format_alert(symbol, is_bullish, condition_str, price)
+        title, message = notification['title'], notification['message']
+        print(f"\n[{datetime.now(IST):%Y-%m-%d %H:%M:%S} IST] {title}")
+        print(message)
+        print(f"Rule details:\n{condition_str}")
 
         if self._desktop_worker is not None and self._desktop_worker.is_alive():
             try:
@@ -98,8 +131,9 @@ class Notifier:
         system = platform.system()
         try:
             # Escape double quotes for shell execution
-            escaped_msg = message.replace('"', '\\"')
-            escaped_title = title.replace('"', '\\"')
+            def apple_string(value):
+                return value.replace('\\', '\\\\').replace('"', '\\"').replace('\r', '\\r').replace('\n', '\\n')
+            escaped_msg, escaped_title = apple_string(message), apple_string(title)
             
             if system == "Darwin":  # macOS
                 applescript = f'display notification "{escaped_msg}" with title "{escaped_title}" sound name "Glass"'
@@ -111,8 +145,8 @@ class Notifier:
                     f'[void] [System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms"); '
                     f'$toast = New-Object System.Windows.Forms.NotifyIcon; '
                     f'$toast.Icon = [System.Drawing.SystemIcons]::Information; '
-                    f'$toast.BalloonTipText = "{escaped_msg}"; '
-                    f'$toast.BalloonTipTitle = "{escaped_title}"; '
+                    f"$toast.BalloonTipText = '{message.replace(chr(39), chr(39) * 2)}'; "
+                    f"$toast.BalloonTipTitle = '{title.replace(chr(39), chr(39) * 2)}'; "
                     f'$toast.Visible = $True; '
                     f'$toast.ShowBalloonTip(5000)'
                 )

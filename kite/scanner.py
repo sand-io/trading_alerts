@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from kiteconnect import KiteConnect, KiteTicker
 
-from notifier import notifier
+from notifier import notifier, format_alert
 from history import HistoryStore
 from historical import HistoricalRequests
 from strategies import StrategyStore
@@ -1001,11 +1001,13 @@ class RealtimeScanner:
                     cooldown = profile.get('cooldown_seconds')
                     notifier.cooldown_seconds = cooldown if cooldown is not None else self.config.get('cooldown_seconds', 300)
                     condition_str = f"[{profile['name']}] {condition_str}"
+                notification = format_alert(sd.symbol, is_bullish, condition_str, ltp, event)
                 sent = notifier.send_alert(sd.symbol, is_bullish=is_bullish,
                                     condition_str=condition_str, price=ltp,
-                                    cooldown_key=key)
+                                    cooldown_key=key, notification=notification)
                 if sent and history:
-                    self._record_history("alert", {**event, "alert_side": result.side})
+                    self._record_history("alert", {**event, "alert_side": result.side,
+                                                  "notification": notification})
 
         if history:
             self._record_history('evaluation', event)
