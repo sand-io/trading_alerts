@@ -8,7 +8,7 @@
     "instrument_type": "FUT",
     "expiry_policy": "nearest_unexpired"
   },
-  "threshold": 50,
+  "threshold": 100,
   "confirmation_timeframe": "3m",
   "combination": "all",
   "timeframe_groups": [
