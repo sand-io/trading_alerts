@@ -1,5 +1,5 @@
 {
-  "name": "strategy 1",
+  "name": "default strategy",
   "threshold": 90.0,
   "confirmation_timeframe": "5m",
   "bullish": [
