@@ -225,6 +225,26 @@ The dashboard also supports a 3-minute chart with EMA 20/50 and optional VWAP, u
 
 ### Saved session review (SQLite)
 
+Open **Daily alerts ↗** in the dashboard header (or `/alerts`) for a separate
+window listing accepted bullish and bearish alerts across all symbols and
+strategies. Choose the trading date, filter by direction or strategy, or search
+by symbol/strategy name. The strategy picker includes all configured profiles
+with their daily alert counts, including zero, plus removed profiles with saved
+alerts. Selecting a zero-alert strategy shows an empty list; it does not enable
+that strategy's notifications. Refresh to include newly saved alerts; older entries
+load in pages of 100. Each card includes the price, score, timeframe, IST time,
+and expandable saved rule/notification details.
+**View on chart** opens the recorded strategy, symbol, date and timeframe in
+a new tab and highlights the alert candle. This does not activate a strategy or
+alter live subscriptions. Saved alerts remain reviewable even if the contract
+is no longer subscribed. If a chart checkpoint is missing, the alert details
+remain available in the daily window. Alert dots are distinct from confirmed
+BULL/BEAR markers because an intrabar alert can change before candle close.
+The window follows existing history retention (today only by default); it
+cannot restore pruned records or fabricate alerts from historical prices.
+Validate the window with `node kite/tests/test_daily_alerts_ui.js` and
+`.venv/bin/python -m unittest kite.tests.test_daily_alerts`.
+
 Desktop notifications use a green 🟢 bullish or red 🔴 bearish signal and the
 exact trading symbol in the title. Their compact body shows the strategy name,
 price in INR, passing/total rules, score and threshold, timeframe, and IST time.
