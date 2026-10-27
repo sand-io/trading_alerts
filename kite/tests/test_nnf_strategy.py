@@ -152,6 +152,31 @@ class NNFStrategyTests(unittest.TestCase):
              patch('nnf_strategy.calculate_stoch', return_value=(pd.Series([0., 0., 2.]), pd.Series([1.] * 3))):
             self.assertEqual(trend_states(frame, self.fast)[-1]['bias'], 'bullish')
 
+    def test_counter_trend_crossover_waits_for_second_close_without_recross(self):
+        for side, closes, oscillator in (
+                ('bearish', [12., 8., 7., 7.], [2., 0., 0., 0.]),
+                ('bullish', [4., 8., 9., 9.], [0., 2., 2., 2.])):
+            emas = {9: pd.Series([10.] * 4), 50: pd.Series([9.] * 4),
+                    200: pd.Series([6.] * 4)} if side == 'bearish' else {
+                        9: pd.Series([6.] * 4), 50: pd.Series([7.] * 4),
+                        200: pd.Series([10.] * 4)}
+            with self.subTest(side=side), \
+                    patch('nnf_strategy.calculate_ema', side_effect=lambda values, period: emas[period]), \
+                    patch('nnf_strategy.calculate_stoch', return_value=(pd.Series(oscillator), pd.Series([1.] * 4))):
+                states = trend_states(pd.DataFrame({'close': closes}), self.fast)
+            self.assertEqual([state['bias'] for state in states], [None, None, side, None])
+
+    def test_pending_counter_trend_cancels_on_recovery_or_stochastic_reversal(self):
+        emas = {9: pd.Series([10.] * 4), 50: pd.Series([9.] * 4),
+                200: pd.Series([6.] * 4)}
+        for closes, oscillator in (([12., 8., 11., 7.], [2., 0., 0., 0.]),
+                                   ([12., 8., 7., 7.], [2., 0., 1., 1.])):
+            with self.subTest(closes=closes, oscillator=oscillator), \
+                    patch('nnf_strategy.calculate_ema', side_effect=lambda values, period: emas[period]), \
+                    patch('nnf_strategy.calculate_stoch', return_value=(pd.Series(oscillator), pd.Series([1.] * 4))):
+                states = trend_states(pd.DataFrame({'close': closes}), self.fast)
+            self.assertTrue(all(state['bias'] is None for state in states))
+
     def test_tangled_ema_context_bypasses_two_candle_rule(self):
         frame = pd.DataFrame({'close': [12., 8.]})
         ema_values = {9: pd.Series([10., 10.]), 50: pd.Series([9., 11.]), 200: pd.Series([6., 6.])}

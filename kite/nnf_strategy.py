@@ -113,6 +113,7 @@ def trend_states(frame, settings):
     emas = [calculate_ema(frame['close'], period).to_numpy() for period in (9, 50, 200)]
     k, d = calculate_stoch(frame, settings.k_period, settings.k_smooth, settings.d_smooth)
     context, bias, output = None, None, []
+    pending = None
     previous = None
     for close, e9, e50, e200, kval, dval in zip(frame['close'], *emas, k, d):
         ready = bool(np.isfinite([close, e9, e50, e200, kval, dval]).all())
@@ -121,6 +122,7 @@ def trend_states(frame, settings):
             up, down = e9 > e50 > e200, e9 < e50 < e200
             if not (up or down):
                 context = None
+                pending = None
             prior_context = context
             if previous is not None:
                 pc, pe9, pk, pdval = previous
@@ -128,10 +130,23 @@ def trend_states(frame, settings):
                 bear_cross = pk >= pdval and kval < dval
                 bull_pullback = prior_context != 'bearish' or (close > e9 and pc > pe9)
                 bear_pullback = prior_context != 'bullish' or (close < e9 and pc < pe9)
-                if (close > e9 or close > e200) and bull_cross and bull_pullback:
+                # Retain a counter-trend crossover while waiting for the
+                # second consecutive close. Cancel it when price recovers or
+                # the oscillator no longer confirms the pending direction.
+                if pending == 'bullish' and not (close > e9 and kval > dval):
+                    pending = None
+                elif pending == 'bearish' and not (close < e9 and kval < dval):
+                    pending = None
+                if bull_cross and prior_context == 'bearish' and close > e9 and not bull_pullback:
+                    pending = 'bullish'
+                elif bear_cross and prior_context == 'bullish' and close < e9 and not bear_pullback:
+                    pending = 'bearish'
+                if (close > e9 or close > e200) and (bull_cross or pending == 'bullish') and bull_pullback:
                     bias = 'bullish'
-                elif (close < e9 or close < e200) and bear_cross and bear_pullback:
+                    pending = None
+                elif (close < e9 or close < e200) and (bear_cross or pending == 'bearish') and bear_pullback:
                     bias = 'bearish'
+                    pending = None
             if up and close > e9:
                 context = 'bullish'
             elif down and close < e9:
@@ -139,6 +154,7 @@ def trend_states(frame, settings):
             previous = (close, e9, kval, dval)
         else:
             previous = None
+            pending = None
         output.append({'context': context, 'bias': bias, 'ready': ready})
     return output
 
