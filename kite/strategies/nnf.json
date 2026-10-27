@@ -1,6 +1,6 @@
 {
   "name": "NNF Multi-Timeframe",
-  "description": "One alert-only multi-timeframe strategy from nnf.pdf. Both 4h/1h/15m and 15m/5m/3m groups must agree in the same direction; all conditions are mandatory. The final execution/confirmation candle is 3m. Higher inputs use completed candles only. Shared 3m OBV/EMA9 crossover and 5m price/VWAP filters are counted once. Remember the established trend through pullbacks; require two opposite closes for counter-trend activation. Bearish rules mirror bullish. IMPORTANT: the user retained Stochastic lookback 14, K smoothing 3, D smoothing 1. K equals D, so directional crossover activation cannot occur. RSI SMA9 is a display smoothing line. No orders, positions or invented stop/target calculations.",
+  "description": "One alert-only multi-timeframe strategy from nnf.pdf. Combines the 4h/1h/15m and 15m/5m/3m groups into 16 rules per direction. At 100% every rule is mandatory; lower thresholds allow partial matches and can bypass individual filters, including directional bias. The final execution/confirmation candle is 3m. Higher inputs use completed candles only. Shared 3m OBV/EMA9 crossover and 5m price/VWAP filters are counted once. Remember the established trend through pullbacks; require two opposite closes for counter-trend activation. Bearish rules mirror bullish. IMPORTANT: the user retained Stochastic lookback 14, K smoothing 3, D smoothing 1. K equals D, so directional crossover activation cannot occur; thresholds below 100% can still produce partial-match alerts without that activation. RSI SMA9 is a display smoothing line. No orders, positions or invented stop/target calculations.",
   "engine": "nnf",
   "instrument_scope": {
     "exchange": "MCX",
@@ -8,7 +8,7 @@
     "instrument_type": "FUT",
     "expiry_policy": "nearest_unexpired"
   },
-  "threshold": 100,
+  "threshold": 50,
   "confirmation_timeframe": "3m",
   "combination": "all",
   "timeframe_groups": [

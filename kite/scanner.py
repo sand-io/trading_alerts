@@ -19,7 +19,7 @@ from historical import HistoricalRequests
 from strategies import StrategyStore
 from instrument_scope import applies, nearest_futures
 from market_sessions import session_bounds, session_is_open
-from nnf_strategy import event_details as nnf_event_details, history_days as nnf_history_days
+from nnf_strategy import event_details as nnf_event_details, history_days as nnf_history_days, MINUTES as NNF_MINUTES
 from strategy_runtime import evaluate_side, live_event, resolve_direction, missing_rule_timeframes
 from strategy_runtime import _candle_dict, SUPPORTED_TIMEFRAMES, BASE_TIMEFRAMES, chart_snapshot, profile_chart_snapshot
 
@@ -657,7 +657,11 @@ class RealtimeScanner:
             self.active_strategy = profile
             self._stock_alert_strategy_id = stock_id
             self.recording_profiles[profile['id']] = profile
-            self._strategy_generation += 1
+            # An NNF-only reload must not discard pending stock alerts. Old
+            # NNF versions are independently rejected by _profile_alerts_enabled.
+            if not (profile.get('engine') == previous.get('engine') == 'nnf'
+                    and profile['id'] == previous['id']):
+                self._strategy_generation += 1
             self.bullish_conditions = profile['bullish']
             self.bearish_conditions = profile['bearish']
             self.alert_threshold = profile['threshold']
@@ -968,7 +972,14 @@ class RealtimeScanner:
         details = nnf_event_details(sd, list(bull_rules) + list(bear_rules), as_of)
         event.update(details)
         missing = sorted(set(missing) | set(details.get('missing_timeframes', [])))
-        if missing:
+        stale_closed_signal = False
+        if event.get('evaluation_mode') == 'closed_candle':
+            cutoff = event.get('as_of')
+            evaluation_time = market_datetime(as_of).replace(tzinfo=MARKET_TZ).timestamp()
+            signal_age = evaluation_time - cutoff if cutoff is not None else float('inf')
+            stale_closed_signal = not 0 <= signal_age < NNF_MINUTES[confirmation] * 60
+            event['signal_stale'] = stale_closed_signal
+        if missing or stale_closed_signal:
             bullish, bearish = replace(bullish, triggered=False), replace(bearish, triggered=False)
             event.update(bullish=bullish.to_dict(), bearish=bearish.to_dict())
         event['threshold'] = threshold

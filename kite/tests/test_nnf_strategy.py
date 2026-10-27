@@ -56,7 +56,6 @@ class NNFStrategyTests(unittest.TestCase):
         nnf_profiles = [item for item in self.store.profiles() if item['id'].startswith('nnf')]
         self.assertEqual([item['id'] for item in nnf_profiles], ['nnf'])
         self.assertEqual(profile['confirmation_timeframe'], '3m')
-        self.assertEqual(profile['threshold'], 100)
         self.assertTrue(profile['warnings'])
         for side in ('bullish', 'bearish'):
             rules = profile[side]
@@ -111,7 +110,8 @@ class NNFStrategyTests(unittest.TestCase):
 
     def test_invalid_formula_threshold_timeframes_and_confirmation_are_rejected(self):
         raw = json.loads((KITE_DIR / 'strategies/nnf.json').read_text())
-        variants = [{'threshold': 90}, {'confirmation_timeframe': '5m'},
+        variants = [{'threshold': 0}, {'threshold': 101}, {'threshold': float('nan')},
+                    {'confirmation_timeframe': '5m'},
                     {'stochastic': {'lookback': 14, 'k_smoothing': 3, 'd_smoothing': 3}},
                     {'timeframe_groups': [{'trend': '15m', 'momentum': '5m', 'execution': '3m'}]},
                     {'combination': 'any'}]
@@ -130,6 +130,29 @@ class NNFStrategyTests(unittest.TestCase):
         self.assertFalse(crossed(pd.Series([3., 4.]), pd.Series([2., 2.]), 'bullish'))
         self.assertFalse(crossed(pd.Series([1., 2.]), pd.Series([2., 2.]), 'bullish'))
         self.assertFalse(crossed(pd.Series([np.nan, 3.]), pd.Series([2., 2.]), 'bullish'))
+
+    def test_configurable_thresholds_count_partial_matches_without_changing_rules(self):
+        raw = json.loads((KITE_DIR / 'strategies/nnf.json').read_text())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'strategies').mkdir()
+            for threshold, required in ((0.1, 1), (40, 7), (50, 8), (60, 10), (80, 13), (87.5, 14), (100, 16)):
+                (root / 'strategies/nnf.json').write_text(json.dumps({**raw, 'threshold': threshold}))
+                profile = StrategyStore(root).load('nnf')
+                self.assertEqual(profile['threshold'], threshold)
+                self.assertEqual(any('Partial-match' in warning for warning in profile['warnings']), threshold < 100)
+                for side in ('bullish', 'bearish'):
+                    rules = profile[side]
+                    for count in (required - 1, required):
+                        passing = set(id(rule) for rule in rules[:count])
+                        def matched(rule, *args):
+                            return id(rule) in passing
+                        with self.subTest(threshold=threshold, side=side, count=count), \
+                                patch('nnf_strategy.NNFCondition.evaluate_at', autospec=True, side_effect=matched):
+                            result = evaluate_side(side, rules, 200, 100, self.data, threshold, as_of=self.as_of)
+                        self.assertEqual(result.total, 16)
+                        self.assertEqual(result.passed, count)
+                        self.assertEqual(result.triggered, count >= required)
 
     def test_counter_trend_remembers_context_and_waits_for_two_closes(self):
         # Inject distinct K/D solely to exercise the otherwise unreachable filter.
@@ -268,10 +291,10 @@ class NNFStrategyTests(unittest.TestCase):
         visible = {candle['time'] for candle in trend['candles']}
         self.assertTrue(all(point['time'] in visible for overlay in trend['overlays'] for point in overlay['points']))
 
-    def test_scanner_records_closed_candle_immediately_once_and_never_alerts(self):
+    def test_scanner_records_strict_closed_candle_immediately_once_and_never_alerts(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch('scanner.KITE_DIR', Path(directory)), patch.object(RealtimeScanner, 'load_config'), \
-                 patch.object(StrategyStore, 'load', return_value=self.store.load('nnf')):
+                 patch.object(StrategyStore, 'load', return_value={**self.store.load('nnf'), 'threshold': 100}):
                 scanner = RealtimeScanner()
             scanner.config = {}
             scanner._archive_charts = Mock(return_value=True)
@@ -294,6 +317,27 @@ class NNFStrategyTests(unittest.TestCase):
             self.assertEqual(len(saved[0]['nnf']['groups']), 2)
             self.assertEqual(saved[0]['bullish']['total'], 16)
 
+    def test_partial_matches_still_require_complete_data(self):
+        profile = {**self.store.load('nnf'), 'threshold': 50}
+        with tempfile.TemporaryDirectory() as directory:
+            with patch('scanner.KITE_DIR', Path(directory)), patch.object(RealtimeScanner, 'load_config'), \
+                    patch.object(StrategyStore, 'load', return_value=profile):
+                scanner = RealtimeScanner()
+            scanner.config = {}
+            scanner._archive_charts = Mock(return_value=True)
+            data = SymbolData(1, 'MCX:GOLD26DECFUT')
+            data.candles = {iv: frame.to_dict('records') for iv, frame in self.data.frames.items() if iv != '1h'}
+            scanner.symbol_data = {1: data}
+            # Even a passing bullish score must be suppressed without slow-group data.
+            def matched(rule, *args):
+                return rule.side == 'bullish'
+            with patch('nnf_strategy.NNFCondition.evaluate_at', autospec=True, side_effect=matched):
+                event = scanner._evaluate_snapshot(EvaluationSnapshot(data), 200, 100, self.as_of, alert=False)
+            self.assertFalse(event['data_ready'])
+            self.assertIn('1h', event['missing_timeframes'])
+            self.assertEqual(event['bullish']['percentage'], 100)
+            self.assertFalse(event['bullish']['triggered'])
+
     def test_missing_lookback_is_visible_and_extended_hourly_buffer_is_retained(self):
         self.assertEqual(history_days(build_rules(self.slow)['bullish']), {'1h': 240})
         short = Frames({'3m': candles('3m', 1)})
@@ -312,6 +356,33 @@ class NNFStrategyTests(unittest.TestCase):
         data.add_tick({'timestamp': datetime(2026, 10, 14, 13, 15), 'last_price': 200, 'volume': 500})
         self.assertGreater(len(data.nnf_candles['1h']), 1000)
         self.assertEqual(len(data.candles['1h']), 201)
+
+    def test_partial_matches_do_not_alert_on_previous_session_or_stale_execution_bar(self):
+        profile = {**self.store.load('nnf'), 'threshold': 40}
+        with tempfile.TemporaryDirectory() as directory:
+            with patch('scanner.KITE_DIR', Path(directory)), patch.object(RealtimeScanner, 'load_config'), \
+                    patch.object(StrategyStore, 'load', return_value=profile):
+                scanner = RealtimeScanner()
+            scanner.config = {}
+            scanner.history = None
+            data = SymbolData(1, 'MCX:GOLD26DECFUT')
+            data.candles = {iv: frame.to_dict('records') for iv, frame in self.data.frames.items()}
+            data.candles['3m'] = [row for row in data.candles['3m'] if row['time'] <= self.as_of - timedelta(minutes=3)]
+            scanner.symbol_data = {1: data}
+            def matched(rule, *args):
+                return rule.side == 'bullish'
+            for stamp, fresh in ((self.as_of, True), (self.as_of + timedelta(seconds=179), True),
+                                  (self.as_of + timedelta(minutes=3), False),
+                                  (datetime(2026, 10, 15, 9), False)):
+                with self.subTest(stamp=stamp), \
+                        patch('nnf_strategy.NNFCondition.evaluate_at', autospec=True, side_effect=matched), \
+                        patch('scanner.datetime', wraps=datetime) as clock, \
+                        patch('scanner.notifier.send_alert', return_value=True) as notify:
+                    clock.now.return_value = stamp.replace(tzinfo=MARKET_TZ)
+                    event = scanner._evaluate_snapshot(EvaluationSnapshot(data), 200, 100, stamp)
+                self.assertTrue(event['data_ready'])
+                self.assertEqual(event['bullish']['triggered'], fresh)
+                self.assertEqual(notify.call_count, int(fresh))
 
     def test_history_upgrade_merges_older_bars_and_preserves_live_candle(self):
         data = SymbolData(1, 'NFO:TEST')

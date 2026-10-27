@@ -76,6 +76,32 @@ class StrategyTests(unittest.TestCase):
         self.store.save_selection('nnf')
         self.assertEqual(self.store.stock_alert_strategy(), 'default')
 
+    def test_nnf_threshold_reload_preserves_stock_profiles_and_queued_alert_ownership(self):
+        from datetime import datetime
+        from unittest.mock import Mock
+        source = Path(__file__).resolve().parents[1] / 'strategies' / 'nnf.json'
+        raw = json.loads(source.read_text())
+        path = self.root / 'strategies' / 'nnf.json'
+        path.write_text(json.dumps({**raw, 'threshold': 80}))
+        scanner = self.scanner()
+        scanner.activate_strategy('nnf')
+        stock_profiles = {key: scanner.recording_profiles[key] for key in ('default', 'trend')}
+        queued = tuple(scanner.recording_profiles.values())
+        generation = scanner._strategy_generation
+        path.write_text(json.dumps({**raw, 'threshold': 40}))
+        scanner.check_reloads()
+        self.assertEqual(scanner.active_strategy['threshold'], 40)
+        self.assertEqual(scanner._strategy_generation, generation)
+        for key, profile in stock_profiles.items():
+            self.assertIs(scanner.recording_profiles[key], profile)
+        scanner.profile_applies = Mock(return_value=True)
+        scanner._evaluate_snapshot = Mock(return_value={})
+        scanner._evaluate_all_snapshot(SymbolData(1, 'NSE:TEST'), 100, 99, datetime.now(), profiles=queued)
+        calls = {call.kwargs['profile']['id']: call.kwargs for call in scanner._evaluate_snapshot.call_args_list}
+        self.assertTrue(calls['default']['alert'])
+        self.assertFalse(calls['trend']['alert'])
+        self.assertFalse(calls['nnf']['alert'])  # outdated NNF version
+
     def test_missing_history_allows_activation_and_preserves_existing_candles(self):
         scanner = self.scanner()
         data = SymbolData(1, 'NFO:ICICIGI26OCTFUT')

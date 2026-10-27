@@ -96,8 +96,12 @@ class StrategyStore:
         name = raw.get('name', strategy_id)
         if not isinstance(name, str) or not name.strip():
             raise ValueError('Strategy name must be nonempty')
+        warnings = [WARNING] if engine == 'nnf' else []
+        if engine == 'nnf' and threshold < 100:
+            warnings.append('Partial-match NNF: alerts use the configured percentage of rules; '
+                            'trend bias and individual PDF filters may fail. This is not the strict PDF workflow.')
         return {'id': strategy_id, 'name': name, 'threshold': threshold,
-                'engine': engine, 'warnings': [WARNING] if engine == 'nnf' else [],
+                'engine': engine, 'warnings': warnings,
                 'instrument_scope': scope,
                 'cooldown_seconds': cooldown, 'confirmation_timeframe': confirmation, **parsed,
                 'version': hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()[:16]}
