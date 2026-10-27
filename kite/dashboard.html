@@ -35,6 +35,7 @@
     <div class="brand"><span class="brand-mark">K</span><span>Basilstar Strategy Monitor</span></div>
     <div class="connection connecting" id="connection"><span class="dot"></span><span id="status">Starting market feed…</span></div>
     <div class="spacer"></div>
+    <a href="/alerts" target="_blank" rel="noopener" style="color:var(--blue);white-space:nowrap;text-decoration:none" title="Review daily alerts across all symbols and strategies">Daily alerts ↗</a>
     <button class="icon-btn" id="resetView" aria-label="Reset chart view" title="Reset chart to the latest 65 candles">Reset view</button>
     <button class="icon-btn" id="fullscreen" aria-label="Open chart in fullscreen" title="Open chart in fullscreen">Fullscreen</button>
     <div class="symbol-picker">
@@ -413,7 +414,34 @@ chart.subscribeCrosshairMove(param=>{if(!param.time||!param.seriesData)return;co
 document.getElementById('studySelect').onchange=event=>{selectedStudy=event.target.value;drawSelectedStudy()};
 studyChart.subscribeCrosshairMove(param=>renderStudyReadouts(param.time));
 chart.subscribeCrosshairMove(param=>renderStudyReadouts(param.time));
-loadStrategies().then(()=>loadSymbols()).catch(error=>{connectionEl.className='connection error';statusEl.textContent='Chart initialization failed';statusEl.title=error.message;console.error('Dashboard initialization failed',error)});
+async function openSavedAlert(alertId){
+ const response=await fetch('/api/alerts/'+encodeURIComponent(alertId));if(!response.ok)throw new Error(await response.text());
+ const saved=await response.json(),event=saved.event,token=Number(event.instrument_token);
+ reviewMode=true;++reviewRequest;++snapshotRequest;currentToken=token;
+ allSymbols=[{token,symbol:event.symbol||String(token)}];symbolSelect.value=String(token);symbolSearch.value=allSymbols[0].symbol;
+ document.getElementById('reviewDate').value=saved.day;reviewStrategyId=event.strategy_id||'default';
+ currentTimeframe=event.confirmation_timeframe||'5m';
+ document.querySelectorAll('.tf-btn').forEach(button=>button.classList.toggle('active',button.dataset.timeframe===currentTimeframe));
+ const option=document.createElement('option');option.value=reviewStrategyId;option.textContent=event.strategy_name||reviewStrategyId;
+ const picker=document.getElementById('reviewStrategy');picker.replaceChildren(option);picker.value=reviewStrategyId;picker.disabled=false;
+ document.getElementById('historyPanel').hidden=false;statusEl.textContent='Saved alert review · IST';
+ const loading=loadSnapshot(token),request=snapshotRequest;await loading;
+ if(request!==snapshotRequest||!reviewMode||currentToken!==token||document.getElementById('reviewDate').value!==saved.day||reviewStrategyId!==(event.strategy_id||'default')||currentTimeframe!==(event.confirmation_timeframe||'5m'))return;
+ if(candleData.length){
+  inspectSaved(event,'Saved alert');
+  const index=candleData.findIndex(row=>row.time===event.candle?.time);
+  if(index>=0){
+   const bullish=event.alert_side==='bullish';
+   if(['bullish','bearish'].includes(event.alert_side)){signalMarkers.push({time:event.candle.time,position:bullish?'belowBar':'aboveBar',color:bullish?COLORS.green:COLORS.red,shape:'circle',text:bullish?'Bullish alert':'Bearish alert'});refreshMarkers()}
+   chart.timeScale().setVisibleLogicalRange({from:Math.max(0,index-25),to:index+10});
+  }else document.getElementById('strategyContext').textContent+=' · The alert candle is outside the saved chart snapshot.';
+ }
+}
+async function initializeDashboard(){
+ const alertId=new URLSearchParams(window.location.search).get('alert_id');
+ if(alertId)await openSavedAlert(alertId);else await loadSymbols();
+}
+loadStrategies().then(initializeDashboard).catch(error=>{connectionEl.className='connection error';statusEl.textContent='Chart initialization failed';statusEl.title=error.message;console.error('Dashboard initialization failed',error)});
 </script>
 </body>
 </html>

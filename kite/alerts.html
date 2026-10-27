@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Daily Alerts · Basilstar</title>
+<style>
+:root{color-scheme:dark;--bg:#0a1019;--panel:#101a28;--border:#233145;--text:#e5edf8;--muted:#8b9db4;--green:#35d5a2;--red:#fb7185;--blue:#69adff}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(ellipse at 15% 0,#15243a 0,transparent 50%),var(--bg);color:var(--text);font:12px system-ui,sans-serif}main{max-width:1480px;margin:auto;padding:18px 24px}header{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:16px}.page-title{display:flex;align-items:center;gap:12px}.brand-mark{display:grid;place-items:center;width:38px;height:38px;border:1px solid #4776ab;border-radius:11px;background:linear-gradient(135deg,#1b4a78,#283d67);color:#c6e2ff;font-size:18px;font-weight:750}.eyebrow{color:var(--blue);font-size:9px;font-weight:700;letter-spacing:1.6px;text-transform:uppercase;margin-bottom:3px}h1{font-size:20px;letter-spacing:-.5px;margin:0}p{color:var(--muted);line-height:1.6}header p{margin:4px 0 0;font-size:11px}a{color:var(--blue)}.dashboard-link{padding:9px 12px;border:1px solid var(--border);border-radius:7px;text-decoration:none;background:#111d2b;font-size:11px}
+button,input,select{font:inherit;color:var(--text);background:#0c1521;border:1px solid var(--border);border-radius:6px;padding:8px 10px;height:34px;min-width:0}button{cursor:pointer}button:hover,a.chart-link:hover{border-color:var(--blue);background:#1b3047}button:disabled{opacity:.5;cursor:wait}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--blue);outline-offset:3px}form{position:sticky;top:0;z-index:5;display:grid;grid-template-columns:150px 175px minmax(180px,1fr) minmax(200px,1.3fr) auto;gap:12px;align-items:end;padding:12px 14px;margin:0;background:#101a28f5;backdrop-filter:blur(12px);border:1px solid var(--border);border-radius:9px;box-shadow:0 8px 25px #0002}label{display:flex;flex-direction:column;gap:5px;font-size:10px;font-weight:600;color:var(--muted)}#refresh{background:#2663a5;border-color:#3776ba;color:#f0f7ff;font-weight:600;padding:8px 16px}#refresh:hover{background:#3176bc}.list-status{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:55px}.counts{display:flex;gap:8px;flex-wrap:wrap;color:var(--muted)}.counts span{padding:5px 9px;border:1px solid var(--border);border-radius:5px;background:#101a28;font-size:11px}.counts .bullish{background:#123128;border-color:#20503e}.counts .bearish{background:#321c29;border-color:#543040}.bullish{color:var(--green)}.bearish{color:var(--red)}#status{color:var(--muted);font-size:10px;text-align:right}.list-head,.alert-card{display:grid;grid-template-columns:minmax(235px,1.35fr) minmax(170px,1.1fr) minmax(165px,1fr) minmax(175px,1fr) 100px;column-gap:16px}.list-head{padding:9px 15px;color:#7d91ab;font-size:9px;font-weight:650;letter-spacing:1px;text-transform:uppercase}.list-head span:last-child{text-align:right}.alert-card{position:relative;align-items:center;color:var(--text);background:linear-gradient(100deg,#121f2e,#101925);border:1px solid var(--border);border-left:3px solid var(--border);border-radius:7px;padding:12px 12px 25px;margin-bottom:7px;transition:border-color .15s,background .15s}.alert-card:hover{border-top-color:#3a526e;border-right-color:#3a526e;border-bottom-color:#3a526e;background:#142234}.alert-card.bullish{border-left-color:var(--green)}.alert-card.bearish{border-left-color:var(--red)}.card-head{min-width:0;display:flex;flex-direction:column;gap:6px}.card-head strong{font-size:12px;font-weight:650;overflow-wrap:anywhere}.card-head time{color:var(--muted);font-size:10px;font-variant-numeric:tabular-nums}.strategy{color:#c2d0e1;font-size:11px;line-height:1.5;overflow-wrap:anywhere}.metrics{color:var(--muted);font-size:11px;line-height:1.7;font-variant-numeric:tabular-nums}.card-actions{display:flex;justify-content:flex-end}.chart-link{display:inline-block;padding:7px 10px;border:1px solid #2e4d70;background:#14273b;border-radius:5px;text-decoration:none;font-size:11px;white-space:nowrap}.details{grid-column:1/-1;color:var(--muted);font-size:11px;min-width:0}.details summary{position:absolute;right:14px;bottom:6px;font-size:10px;cursor:pointer;color:#96adc7}.details[open]{margin-top:12px;padding:14px 0 2px;border-top:1px solid var(--border)}.details[open] summary{position:static;color:var(--blue);margin-bottom:10px}pre{font:11px/1.7 ui-monospace,monospace;white-space:pre-wrap;overflow-wrap:anywhere;margin:0 0 10px}.rules{padding-left:18px;line-height:1.8;margin-bottom:0}.empty{padding:42px 16px;text-align:center;border:1px dashed var(--border);border-radius:8px;color:var(--muted)}#more{display:block;margin:14px auto}#more[hidden]{display:none}.page-note{font-size:10px;color:#70839b;margin:14px 0;line-height:1.7}
+@media(max-width:1100px){main{padding:16px}.list-head,.alert-card{grid-template-columns:minmax(205px,1.3fr) minmax(140px,1fr) minmax(145px,1fr) minmax(145px,1fr) 90px;column-gap:10px}form{grid-template-columns:140px 155px minmax(145px,1fr) minmax(165px,1fr) auto;gap:9px}#refresh{padding:8px 10px}}
+@media(max-width:850px){form{grid-template-columns:1fr 1fr 1fr}.list-head{display:none}.alert-card{grid-template-columns:1.3fr 1fr 90px;row-gap:8px;margin-top:8px}.card-head{grid-column:1}.strategy{grid-column:2}.card-actions{grid-column:3;grid-row:1/3}.metrics{grid-row:2}.list-status{align-items:flex-start;padding:12px 0;flex-wrap:wrap}#status{text-align:left}}
+@media(max-width:560px){main{padding:12px}header{align-items:flex-start}.brand-mark{display:none}header p{max-width:200px;font-size:10px}.dashboard-link{font-size:10px;padding:8px}form{grid-template-columns:1fr 1fr;padding:10px;gap:10px}form label:nth-child(3){grid-column:1/-1}form label:nth-child(4){grid-column:1}#refresh{align-self:end}.alert-card{grid-template-columns:1fr 90px}.strategy{grid-column:1;grid-row:2}.metrics{grid-column:1;grid-row:auto}.card-actions{grid-column:2;grid-row:1/3}.card-head strong{font-size:11px}}
+</style>
+</head>
+<body><main>
+<header><div class="page-title"><span class="brand-mark" aria-hidden="true">B</span><div><div class="eyebrow">Basilstar · Session archive</div><h1>Daily alerts</h1><p>Every signal. Every strategy. One clear view.</p></div></div><a class="dashboard-link" href="/" target="_blank" rel="noopener">Dashboard ↗</a></header>
+<form id="filters">
+<label>Trading date<input id="day" type="date" required></label>
+<label>Direction<select id="side"><option value="">Bullish &amp; bearish</option><option value="bullish">🟢 Bullish</option><option value="bearish">🔴 Bearish</option></select></label>
+<label>Strategy<select id="strategy"><option value="">All strategies</option></select></label>
+<label>Search<input id="search" type="search" placeholder="Symbol or strategy name"></label>
+<button id="refresh" type="submit">Refresh alerts</button>
+</form>
+<div class="list-status"><div class="counts" id="counts" aria-live="polite"></div><div id="status" role="status" aria-live="polite"></div></div>
+<div class="list-head" aria-hidden="true"><span>Direction / symbol / time (IST)</span><span>Strategy</span><span>Price / timeframe</span><span>Rules / score</span><span>Review</span></div>
+<section id="alerts" aria-label="Saved daily alerts"></section>
+<button id="more" type="button" hidden>Load more alerts</button>
+<p class="page-note">Only alerts accepted by the scanner are listed; evaluations and confirmed candle states are separate. Desktop delivery can still fail. <span id="retention">Records follow your configured history retention.</span></p>
+</main>
+<script>
+const el=id=>document.getElementById(id);
+let cursor=null,requestId=0;
+const dayFormat=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Kolkata',year:'numeric',month:'2-digit',day:'2-digit'});
+el('day').value=dayFormat.format(new Date());
+function textElement(tag,text,className=''){const node=document.createElement(tag);node.textContent=text;if(className)node.className=className;return node}
+function money(value){return value==null?'—':Number(value).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2})}
+function alertTime(event){const raw=event.market_time||event.server_time;return raw?new Date(raw).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour12:false})+' IST':'Time unavailable'}
+function renderAlert(item){
+ const event=item.event,side=event.alert_side,result=event[side]||{},bull=side==='bullish';
+ const card=document.createElement('article');card.className='alert-card '+(side==='bullish'||side==='bearish'?side:'');
+ const top=textElement('div','','card-head');top.append(textElement('strong',(bull?'🟢 Bullish':side==='bearish'?'🔴 Bearish':'Alert')+' · '+(event.symbol||'Token '+event.instrument_token)),textElement('time',alertTime(event)));card.append(top);
+ card.append(textElement('div',event.strategy_name||event.strategy_id||'Default strategy','strategy'));
+ const mode=event.evaluation_mode==='closed_candle'?'Closed candle':'Live / provisional';
+ card.append(textElement('div','LTP INR '+money(event.price)+' · '+(event.confirmation_timeframe||'5m')+' · '+mode,'metrics'));
+ card.append(textElement('div',`Rules ${result.passed??'—'}/${result.total??'—'} · Score ${result.percentage==null?'—':Number(result.percentage).toFixed(1)+'%'} · Required ${event.threshold??'—'}%`,'metrics'));
+ const actions=textElement('div','','card-actions'),link=textElement('a','Chart ↗','chart-link');link.href='/?alert_id='+encodeURIComponent(item.id);link.target='_blank';link.rel='noopener';actions.append(link);card.append(actions);
+ const details=document.createElement('details');details.className='details';details.append(textElement('summary','Details & rules'));
+ const notification=event.notification;
+ if(notification)details.append(textElement('pre',notification.details||notification.message||''));
+ details.append(textElement('div','Strategy ID: '+(event.strategy_id||'default')+' · Version: '+(event.strategy_version||'not recorded')+' · VWAP: '+money(event.vwap)));
+ const rules=document.createElement('ul');rules.className='rules';
+ for(const rule of result.rules||[])rules.append(textElement('li',(rule.passed?'✓ ':'× ')+rule.text+(rule.error?' · '+rule.error:'')));
+ details.append(rules);card.append(details);return card;
+}
+async function loadAlerts(append=false){
+ const request=++requestId;
+ const params=new URLSearchParams({day:el('day').value,limit:'100'});
+ for(const [id,key] of [['side','side'],['strategy','strategy_id'],['search','search']])if(el(id).value)params.set(key,el(id).value);
+ if(append&&cursor)params.set('before_id',cursor);
+ if(!append){cursor=null;el('alerts').replaceChildren();el('counts').textContent=''}
+ el('more').hidden=true;el('status').textContent='Loading saved alerts…';el('refresh').disabled=true;
+ try{
+  const response=await fetch('/api/alerts?'+params);if(!response.ok)throw new Error(await response.text());
+  const data=await response.json();if(request!==requestId)return;
+  if(data.retention_days)el('retention').textContent='History retention: '+data.retention_days+' calendar day'+(data.retention_days===1?'':'s')+', including today (IST).';
+  if(!append){const selected=el('strategy').value;el('strategy').replaceChildren();const all=textElement('option','All strategies');all.value='';el('strategy').append(all);for(const strategy of data.strategies){const option=textElement('option',strategy.name+(strategy.alert_count==null?'':' ('+strategy.alert_count+' alerts)'));option.value=strategy.id;el('strategy').append(option)}el('strategy').value=selected}
+  el('counts').replaceChildren(textElement('span',data.total+' alerts'),textElement('span','🟢 '+data.bullish+' bullish','bullish'),textElement('span','🔴 '+data.bearish+' bearish','bearish'));
+  for(const item of data.alerts)el('alerts').append(renderAlert(item));
+  cursor=data.next_cursor;el('more').hidden=cursor==null;el('status').textContent='Newest recorded first · Updated '+new Date().toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata'})+' IST';
+  if(!data.total)el('alerts').append(textElement('div','No saved alerts match this date and filters. Try another date or clear the filters.','empty'));
+ }catch(error){if(request===requestId)el('status').textContent='Could not load alerts. '+error.message}
+ finally{if(request===requestId)el('refresh').disabled=false}
+}
+el('filters').onsubmit=event=>{event.preventDefault();loadAlerts()};
+el('day').onchange=()=>{el('strategy').value='';loadAlerts()};
+el('side').onchange=()=>loadAlerts();el('strategy').onchange=()=>loadAlerts();
+el('more').onclick=()=>loadAlerts(true);
+loadAlerts();
+</script></body></html>

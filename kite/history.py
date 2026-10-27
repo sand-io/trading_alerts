@@ -28,6 +28,7 @@ class HistoryStore:
                     id INTEGER PRIMARY KEY, token INTEGER, day TEXT, kind TEXT,
                     candle INTEGER, payload TEXT, strategy TEXT NOT NULL DEFAULT 'default');
                 CREATE INDEX IF NOT EXISTS events_lookup ON events(token,day,kind);
+                CREATE INDEX IF NOT EXISTS events_day_kind ON events(day,kind,id);
 
                 CREATE TABLE IF NOT EXISTS strategy_charts (
                     token INTEGER, day TEXT, timeframe TEXT, strategy TEXT, payload TEXT,
@@ -106,6 +107,48 @@ class HistoryStore:
             row = db.execute('SELECT payload FROM charts WHERE token=? AND day=? AND timeframe=?',
                              (token, day, timeframe)).fetchone()
         return json.loads(row[0]) if row else None
+
+    def alert_days(self):
+        with self.connect() as db:
+            return [row[0] for row in db.execute(
+                "SELECT DISTINCT day FROM events WHERE kind='alert' ORDER BY day DESC")]
+
+    def daily_alerts(self, day, side=None, strategy_id=None, search='', before_id=None, limit=100):
+        """Read accepted alerts across every symbol; page without loading evaluations."""
+        clauses, args = ["day=?", "kind='alert'"], [day]
+        if side:
+            clauses.append("json_extract(payload,'$.alert_side')=?")
+            args.append(side)
+        if strategy_id:
+            clauses.append('strategy=?')
+            args.append(strategy_id)
+        if search.strip():
+            clauses.append("instr(lower(coalesce(json_extract(payload,'$.symbol'),'') || ' ' || "
+                           "coalesce(json_extract(payload,'$.strategy_name'),strategy)),lower(?))>0")
+            args.append(search.strip())
+        where = ' AND '.join(clauses)
+        with self.connect() as db:
+            counts = dict(db.execute("SELECT coalesce(json_extract(payload,'$.alert_side'),'unknown'),count(*) "
+                                     f'FROM events WHERE {where} GROUP BY 1', args))
+            strategies = [{'id': row[0], 'name': row[1], 'alert_count': row[2]} for row in db.execute(
+                "SELECT strategy,coalesce(json_extract(payload,'$.strategy_name'),strategy),count(*) "
+                "FROM events WHERE day=? AND kind='alert' GROUP BY strategy ORDER BY strategy", (day,))]
+            page_where, page_args = where, list(args)
+            if before_id is not None:
+                page_where += ' AND id<?'
+                page_args.append(before_id)
+            rows = list(db.execute(f'SELECT id,payload FROM events WHERE {page_where} ORDER BY id DESC LIMIT ?',
+                                   [*page_args, limit + 1]))
+        alerts = [{'id': row[0], 'day': day, 'event': json.loads(row[1])} for row in rows[:limit]]
+        return {'day': day, 'alerts': alerts, 'total': sum(counts.values()),
+                'bullish': counts.get('bullish', 0), 'bearish': counts.get('bearish', 0),
+                'strategies': strategies, 'retention_days': self.retention_days,
+                'next_cursor': alerts[-1]['id'] if len(rows) > limit else None}
+
+    def alert(self, alert_id):
+        with self.connect() as db:
+            row = db.execute("SELECT day,payload FROM events WHERE id=? AND kind='alert'", (alert_id,)).fetchone()
+        return {'id': alert_id, 'day': row[0], 'event': json.loads(row[1])} if row else None
 
     def save_strategy_charts(self, token, day, strategy_id, charts):
         rows = [(token, day, tf, strategy_id, json.dumps(chart)) for tf, chart in charts.items()]

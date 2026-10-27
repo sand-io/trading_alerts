@@ -239,6 +239,47 @@ def strategies():
             'error': scanner.strategy_error}
 
 
+@app.get('/alerts', response_class=HTMLResponse)
+def alerts_window():
+    return FileResponse(KITE_DIR / 'alerts.html', media_type='text/html')
+
+
+@app.get('/api/alerts/dates')
+def alert_dates():
+    return scanner.history.alert_days()
+
+
+@app.get('/api/alerts')
+def daily_alerts(day: str, side: str | None = None, strategy_id: str | None = None,
+                 search: str = '', before_id: int | None = None, limit: int = 100):
+    try:
+        datetime.strptime(day, '%Y-%m-%d')
+    except ValueError:
+        raise HTTPException(400, 'Date must be YYYY-MM-DD')
+    if side not in (None, 'bullish', 'bearish'):
+        raise HTTPException(400, 'Direction must be bullish or bearish')
+    if not 1 <= limit <= 200 or (before_id is not None and before_id < 1):
+        raise HTTPException(400, 'Invalid page size or cursor')
+    result = scanner.history.daily_alerts(day, side, strategy_id, search, before_id, limit)
+    # Include zero-alert profiles, while keeping deleted historical profiles reviewable.
+    profiles = {profile['id']: profile for profile in result['strategies']}
+    store = getattr(scanner, 'strategy_store', None)
+    for profile in store.profiles() if store is not None else ():
+        previous = profiles.get(profile['id'], {})
+        profiles[profile['id']] = {**previous, 'id': profile['id'], 'name': profile['name'],
+                                   'alert_count': previous.get('alert_count', 0)}
+    result['strategies'] = sorted(profiles.values(), key=lambda profile: profile['name'].casefold())
+    return result
+
+
+@app.get('/api/alerts/{alert_id}')
+def saved_alert(alert_id: int):
+    result = scanner.history.alert(alert_id)
+    if result is None:
+        raise HTTPException(404, 'Saved alert is unavailable or outside the retention period')
+    return result
+
+
 @app.post('/api/strategies/{strategy_id}/activate')
 def activate_strategy(strategy_id: str):
     try:
