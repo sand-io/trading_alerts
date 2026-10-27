@@ -232,7 +232,7 @@ function refreshStrategyState(active){
  if(active&&active.id===activeStrategyId&&active.version===activeStrategyVersion)return Promise.resolve();
  if(strategyRefresh){if(active&&(!strategyRefreshTarget||active.id!==strategyRefreshTarget.id||active.version!==strategyRefreshTarget.version)){strategyRefreshTarget=active;strategyRefreshAgain=true}return strategyRefresh}
  strategyRefreshTarget=active;
- strategyRefresh=(async()=>{do{strategyRefreshAgain=false;await loadStrategies();if(currentToken!==null&&!reviewMode)await loadSnapshot(currentToken)}while(strategyRefreshAgain)})()
+ strategyRefresh=(async()=>{do{strategyRefreshAgain=false;await loadStrategies();if(!reviewMode){const changed=await refreshSymbols();if(!changed&&currentToken!==null)await loadSnapshot(currentToken)}}while(strategyRefreshAgain)})()
  .finally(()=>{strategyRefresh=null;strategyRefreshTarget=null});
  return strategyRefresh;
 }
@@ -340,7 +340,7 @@ async function loadRecordedSelection(token){
 }
 document.getElementById('reviewButton').onclick=async()=>{reviewMode=true;document.getElementById('historyPanel').hidden=false;await loadRecordedSelection(currentToken)};
 document.getElementById('reviewDate').onchange=async()=>{if(reviewMode)await loadRecordedSelection(currentToken)};
-document.getElementById('liveButton').onclick=async()=>{reviewMode=false;reviewCandleStates.clear();++reviewRequest;++snapshotRequest;reviewEvents=[];reviewAlerts=[];document.getElementById('historyPanel').hidden=true;document.getElementById('reviewStatus').textContent='';try{await chooseSymbol()}catch(error){setStatus('error',error.message)}};
+document.getElementById('liveButton').onclick=async()=>{reviewMode=false;reviewCandleStates.clear();++reviewRequest;++snapshotRequest;reviewEvents=[];reviewAlerts=[];document.getElementById('historyPanel').hidden=true;document.getElementById('reviewStatus').textContent='';try{if(!await refreshSymbols())await chooseSymbol()}catch(error){setStatus('error',error.message)}};
 async function chooseSymbol(){if(!symbolSelect.value)return;const token=Number(symbolSelect.value);if(!allSymbols.some(item=>Number(item.token)===token))return;currentToken=token;if(socket){socket.onclose=null;socket.onmessage=null;socket.close()};if(reviewMode)await loadRecordedSelection(token);else await loadSnapshot(token);if(token===currentToken)connect(token)}
 function matchingSymbols(symbols,query){
  const normalize=value=>value.toUpperCase().replace(/[^A-Z0-9]/g,'');const term=normalize(query);
@@ -394,7 +394,18 @@ symbolSearch.onkeydown=event=>{
 symbolSearch.onclick=()=>{if(document.getElementById('symbolResults').hidden){symbolSearch.select?.();renderSymbolOptions('')}};
 document.getElementById('symbolClear').onclick=()=>{symbolSearch.focus?.();symbolSearch.value='';renderSymbolOptions('')};
 document.addEventListener('click',event=>{if(!event.target.closest('.symbol-picker'))closeSymbolPicker()});
-async function loadSymbols(){for(let attempt=0;attempt<30;attempt++){const response=await fetch('/api/symbols');allSymbols=await response.json();if(allSymbols.length){await selectSymbol(allSymbols[0]);return}await new Promise(resolve=>setTimeout(resolve,Math.min(1000+attempt*250,3000)))}throw new Error('Scanner did not resolve any symbols')}
+async function refreshSymbols(){
+ const response=await fetch('/api/symbols');if(!response.ok)throw new Error('Could not load strategy symbols');
+ allSymbols=await response.json();
+ if(allSymbols.some(item=>Number(item.token)===currentToken)){closeSymbolPicker();return false}
+ ++snapshotRequest;++reviewRequest;
+ if(socket){socket.onclose=null;socket.onmessage=null;socket.close();socket=null}clearInterval(heartbeat);clearTimeout(reconnectTimer);
+ currentToken=null;symbolSelect.value='';symbolSearch.value='';closeSymbolPicker();clearChartSelection();
+ if(allSymbols.length)await selectSymbol(allSymbols[0]);
+ else document.getElementById('strategyContext').textContent='No eligible contracts resolved for this strategy. Check scanner instrument errors.';
+ return true;
+}
+async function loadSymbols(){for(let attempt=0;attempt<30;attempt++){await refreshSymbols();if(allSymbols.length)return;await new Promise(resolve=>setTimeout(resolve,Math.min(1000+attempt*250,3000)))}throw new Error('Scanner did not resolve any symbols for this strategy')}
 document.querySelectorAll('.tf-btn').forEach(button=>button.onclick=async()=>{if(button.dataset.timeframe===currentTimeframe)return;currentTimeframe=button.dataset.timeframe;document.querySelectorAll('.tf-btn').forEach(item=>item.classList.toggle('active',item===button));if(socket?.readyState===1)socket.send(JSON.stringify({type:'set_timeframe',timeframe:currentTimeframe}));try{await loadSnapshot(currentToken)}catch(error){setStatus('error',error.message)}});
 document.getElementById('levelsToggle').onclick=event=>{levelsVisible=!levelsVisible;event.currentTarget.classList.toggle('off',!levelsVisible);applyLevels(currentLevels)};
 document.getElementById('resetView').onclick=resetVisibleRange;document.getElementById('fullscreen').onclick=()=>document.getElementById('chartPanel').requestFullscreen?.();

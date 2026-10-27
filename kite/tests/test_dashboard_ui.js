@@ -176,7 +176,7 @@ async function testStrategySync(){
  let calls=0,release;
  const syncContext=vm.createContext({Promise,activeStrategyId:'default',activeStrategyVersion:'v1',currentToken:null,reviewMode:false,
    loadStrategies:async()=>{calls++;await new Promise(resolve=>{release=resolve});syncContext.activeStrategyId='trend';syncContext.activeStrategyVersion='v2'},
-   loadSnapshot:async()=>{throw new Error('No symbol selected')}});
+   refreshSymbols:async()=>false,loadSnapshot:async()=>{throw new Error('No symbol selected')}});
  vm.runInContext(html.slice(html.indexOf('let strategyRefresh='),html.indexOf("document.getElementById('activateStrategy').onclick")),syncContext);
  await vm.runInContext("refreshStrategyState({id:'default',version:'v1'})",syncContext);
  assert.equal(calls,0);
@@ -190,6 +190,31 @@ async function testStrategySync(){
  assert.equal(calls,2);release();await reviewRefresh;
 }
 testStrategySync().catch(error=>{console.error(error);process.exitCode=1});
+
+async function testStrategySymbolRefresh(){
+ const stock={token:1,symbol:'NFO:TEST'},gold={token:2,symbol:'MCX:GOLD26DECFUT'},crude={token:3,symbol:'MCX:CRUDEOIL26OCTFUT'};
+ let rows=[gold,crude],closed=0,cleared=0;const selected=[];
+ const state={currentToken:1,allSymbols:[stock,gold,crude],snapshotRequest:0,reviewRequest:0,
+  socket:{close(){closed++}},heartbeat:null,reconnectTimer:null,
+  symbolSelect:{value:'1'},symbolSearch:{value:stock.symbol},
+  fetch:async()=>({ok:true,json:async()=>rows}),clearInterval(){},clearTimeout(){},closeSymbolPicker(){},
+  clearChartSelection(){cleared++},document:{getElementById:()=>({})},
+  selectSymbol:async item=>{state.currentToken=item.token;selected.push(item.token)}};
+ const ctx=vm.createContext(state);
+ vm.runInContext(html.slice(html.indexOf('async function refreshSymbols('),html.indexOf('async function loadSymbols(')),ctx);
+ assert.equal(await vm.runInContext('refreshSymbols()',ctx),true);
+ assert.equal(state.currentToken,2);assert.equal(closed,1);assert.equal(cleared,1);
+ assert.deepEqual(state.allSymbols,[gold,crude]);
+ assert.equal(await vm.runInContext('refreshSymbols()',ctx),false);
+ assert.deepEqual(selected,[2]); // keep the eligible selection without reloading
+ rows=[stock];await vm.runInContext('refreshSymbols()',ctx);
+ assert.equal(state.currentToken,1);assert.deepEqual(state.allSymbols,[stock]);
+ rows=[];await vm.runInContext('refreshSymbols()',ctx);
+ assert.equal(state.currentToken,null);assert.equal(state.symbolSelect.value,'');
+ assert.deepEqual(state.allSymbols,[]);assert.equal(state.snapshotRequest,3);
+ console.log('Strategy symbol filtering, automatic selection, and missing-contract clearing tests passed');
+}
+testStrategySymbolRefresh().catch(error=>{console.error(error);process.exitCode=1});
 
 async function testRecordedStrategySelection(){
  const reviewNodes=new Map(),requests=[];

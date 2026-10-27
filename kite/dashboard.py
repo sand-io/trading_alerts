@@ -251,7 +251,9 @@ def activate_strategy(strategy_id: str):
 @app.get("/api/symbols")
 async def symbols():
     return [{"token": token, "symbol": symbol}
-            for token, symbol in scanner.token_to_symbol.items()]
+            for token, symbol in scanner.token_to_symbol.items()
+            if token in scanner.symbol_data
+            and scanner.profile_applies(scanner.active_strategy, scanner.symbol_data[token])]
 
 
 @app.get("/api/snapshot/{instrument_token}")

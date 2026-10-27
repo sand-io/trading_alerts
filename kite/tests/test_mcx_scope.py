@@ -162,6 +162,24 @@ class CommodityScopeTests(unittest.TestCase):
         self.assertEqual(self.scanner.token_to_symbol, {1: self.stock.symbol})
         self.assertEqual(set(self.scanner.instrument_errors), {'MCX', 'GOLD', 'CRUDEOIL'})
 
+    def test_dashboard_symbol_list_follows_strategy_and_nearest_commodity_tokens(self):
+        import asyncio
+        import dashboard
+        later = SymbolData(4, 'MCX:GOLD27FEBFUT')
+        self.scanner.symbol_data[4] = later
+        self.scanner.token_to_symbol = {token: data.symbol for token, data in self.scanner.symbol_data.items()}
+        self.scanner._commodity_tokens = {2, 3}
+        with patch.object(dashboard, 'scanner', self.scanner):
+            for identifier, expected in (('nnf', {2, 3}), ('default', {1}), ('btst_setup', {1})):
+                self.scanner.active_strategy = self.profiles[identifier]
+                result = asyncio.run(dashboard.symbols())
+                self.assertEqual({row['token'] for row in result}, expected)
+            self.scanner.active_strategy = self.profiles['nnf']
+            self.scanner._commodity_tokens = set()
+            self.assertEqual(asyncio.run(dashboard.symbols()), [])
+        self.assertEqual(len(self.scanner.symbol_data), 4)
+        self.assertEqual(self.scanner.config['symbols'], [self.stock.symbol])
+
     def test_dashboard_clears_ineligible_rules_but_keeps_charts_and_eligible_studies(self):
         import dashboard
         for data in self.scanner.symbol_data.values():
