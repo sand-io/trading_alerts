@@ -221,10 +221,11 @@ class SymbolData:
             typical = (record['high'] + record['low'] + record['close']) / 3.
             volume = float(record['volume'])
             session_value += typical * volume
+            cumulative_start = session_volume
             session_volume += volume
             candles.append({'time': stamp,
                 **{field: record[field] for field in ('open', 'high', 'low', 'close', 'volume')},
-                'cumulative_volume_start': 0, 'cumulative_volume_end': 0,
+                'cumulative_volume_start': cumulative_start, 'cumulative_volume_end': session_volume,
                 'vwap': session_value / session_volume if session_volume else typical})
         return candles
 
@@ -243,9 +244,11 @@ class SymbolData:
         ltp = tick.get("last_price")
         if not self._is_valid_price(ltp):
             return set()
-        tick_vwap = tick.get("average_price")
+        # KiteTicker's native names differ from REST quote names. Keep legacy
+        # aliases for callers/replays, but prefer the actual SDK fields.
+        tick_vwap = tick.get("average_traded_price", tick.get("average_price"))
         tick_time = tick.get("exchange_timestamp") or tick.get("timestamp") or datetime.now(MARKET_TZ)
-        volume = tick.get("volume", 0)
+        volume = tick.get("volume_traded", tick.get("volume", 0))
 
         # Strip timezone if present
         tick_time = market_datetime(tick_time)
@@ -255,6 +258,7 @@ class SymbolData:
         if previous_tick is not None and tick_time < previous_tick:
             return set()
         self._latest_exchange_time = tick_time
+        session_open = session_bounds(tick_time, self.exchange)[0]
 
         rolled_intervals = set()
         for iv in self.intervals:
@@ -273,21 +277,22 @@ class SymbolData:
                 vwap = float(previous_vwap)
             else:
                 # Never inject zero into the shared price scale or strategy.
-                # Before Kite publishes average_price, LTP is the safest finite
+                # Before Kite publishes average_traded_price, LTP is the safest finite
                 # fallback for a newly observed instrument.
                 vwap = float(ltp)
             
             # Check if we should start a new candle or update current one
             if not self.candles[iv]:
                 # First candle
+                start_volume = 0 if iv == '1d' or bucket_time == session_open else volume
                 new_candle = {
                     'time': bucket_time,
                     'open': ltp,
                     'high': ltp,
                     'low': ltp,
                     'close': ltp,
-                    'volume': 0,
-                    'cumulative_volume_start': volume,
+                    'volume': max(0, volume - start_volume),
+                    'cumulative_volume_start': start_volume,
                     'cumulative_volume_end': volume,
                     'vwap': vwap
                 }
@@ -296,7 +301,13 @@ class SymbolData:
             elif bucket_time > self.last_tick_time[iv]:
                 rolled_intervals.add(iv)
                 # Close the current candle and open a new one
-                start_volume = self.candles[iv][-1]['cumulative_volume_end']
+                if same_session:
+                    start_volume = self.candles[iv][-1]['cumulative_volume_end']
+                else:
+                    # Session cumulative volume starts at zero each day. With
+                    # no current-day history mid-session, count observed deltas
+                    # instead of inventing a full opening-to-now candle.
+                    start_volume = 0 if iv == '1d' or bucket_time == session_open else volume
                 
                 new_candle = {
                     'time': bucket_time,
@@ -886,7 +897,7 @@ class RealtimeScanner:
         ltp = tick.get("last_price")
         if ltp is None:
             return None
-        # In Kite, average_price is the running daily VWAP
+        # In KiteTicker, average_traded_price is the running daily VWAP
         vwap = sd.get_latest_vwap('5m', ltp)
 
         if defer_evaluation:

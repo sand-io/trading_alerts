@@ -167,7 +167,14 @@ The split dashboard does not rebuild unused historical combined-score plots.
 Run shutdown regression checks from the repository root with
 `.venv/bin/python -m unittest kite.tests.test_dashboard_shutdown kite.tests.test_live_dashboard`.
 
-Kite supplies exact live VWAP through `average_price`. Its historical candle API
+KiteTicker supplies exact live VWAP through `average_traded_price` and cumulative
+session volume through `volume_traded`. Legacy `average_price`/`volume` tick
+aliases remain supported for replays, but native SDK fields take precedence.
+Historical candles reconstruct cumulative session-volume baselines separately
+for each interval, and the baseline resets at the instrument's exchange open.
+This prevents live hourly volume from becoming zero or inheriting a previous
+session's total, and keeps OBV/VWAP inputs correct for Default, BTST and NNF.
+Kite's historical candle API
 does not include VWAP, so pre-connection chart history uses a conventional
 OHLC-volume reconstruction and switches to Kite's exact value on live ticks.
 
