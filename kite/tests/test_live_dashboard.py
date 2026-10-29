@@ -11,6 +11,43 @@ from strategy_runtime import chart_snapshot, evaluate_side, live_event, resolve_
 
 
 class TestLiveDashboard(unittest.TestCase):
+    def test_sdk_fields_update_vwap_and_volume_without_mutating_tick(self):
+        data = SymbolData(1, 'NFO:TEST26NOVFUT')
+        data.intervals = {'5m'}
+        data.candles['5m'] = []
+        data.last_tick_time['5m'] = None
+        stamp = datetime(2026, 10, 7, 9, 15, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+        raw = {'exchange_timestamp': stamp, 'last_price': 100,
+               'volume_traded': 1000, 'average_traded_price': 99.5}
+        normalized = normalize_kite_tick(raw)
+        self.assertEqual(normalized['volume'], 1000)
+        self.assertEqual(normalized['average_price'], 99.5)
+        self.assertNotIn('volume', raw)
+        data.add_tick(normalized)
+        data.add_tick({**raw, 'last_price': 101, 'volume_traded': 1100})
+        row = data.get_dataframe('5m').iloc[-1]
+        self.assertEqual(row.volume, 1100)
+        self.assertEqual(row.vwap, 99.5)
+        self.assertEqual(row.close, 101)
+
+    def test_native_history_sets_volume_baseline_and_new_session_resets_it(self):
+        from unittest.mock import patch
+        records = [dict(date=datetime(2026, 10, 7, 9, minute), open=100,
+                        high=101, low=99, close=100, volume=volume)
+                   for minute, volume in ((15, 100), (20, 200))]
+        data = SymbolData(1, 'NFO:TEST26NOVFUT')
+        data.intervals = {'5m'}
+        with patch('scanner.history_requests.fetch', return_value=records):
+            data.initialize_historical_candles(object(), '5m')
+        self.assertEqual(data.candles['5m'][-1]['cumulative_volume_start'], 100)
+        self.assertEqual(data.candles['5m'][-1]['cumulative_volume_end'], 300)
+        data.add_tick(dict(exchange_timestamp=datetime(2026, 10, 7, 9, 22),
+                           last_price=101, volume_traded=350, average_traded_price=100.5))
+        self.assertEqual(data.candles['5m'][-1]['volume'], 250)
+        data.add_tick(dict(exchange_timestamp=datetime(2026, 10, 8, 9, 15),
+                           last_price=102, volume_traded=25, average_traded_price=102))
+        self.assertEqual(data.candles['5m'][-1]['volume'], 25)
+
     def test_three_minute_chart_history_overlays_and_live_rollover(self):
         from scanner import RealtimeScanner
         from unittest.mock import Mock

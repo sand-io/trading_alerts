@@ -55,6 +55,11 @@ def normalize_kite_tick(tick):
     normalize only at the SDK boundary, without changing prices or buckets.
     """
     normalized = dict(tick)
+    # KiteTicker names these fields differently from our internal candle API.
+    if 'volume_traded' in tick:
+        normalized['volume'] = tick['volume_traded']
+    if 'average_traded_price' in tick:
+        normalized['average_price'] = tick['average_traded_price']
     for key in ("exchange_timestamp", "last_trade_time"):
         value = normalized.get(key)
         if isinstance(value, datetime):
@@ -171,6 +176,7 @@ class SymbolData:
                     session_volume = 0.0
                 typical_price = (h + l + c) / 3.0
                 candle_volume = float(r['volume'])
+                start_volume = session_volume
                 session_value += typical_price * candle_volume
                 session_volume += candle_volume
                 # Kite historical candles do not expose exchange VWAP. This is
@@ -185,8 +191,8 @@ class SymbolData:
                     'low': l,
                     'close': c,
                     'volume': r['volume'],
-                    'cumulative_volume_start': 0,
-                    'cumulative_volume_end': 0,
+                    'cumulative_volume_start': start_volume,
+                    'cumulative_volume_end': session_volume,
                     'vwap': historical_vwap
                 })
             
@@ -220,9 +226,14 @@ class SymbolData:
         ltp = tick.get("last_price")
         if not self._is_valid_price(ltp):
             return set()
-        tick_vwap = tick.get("average_price")
+        tick_vwap = tick.get("average_traded_price", tick.get("average_price"))
         tick_time = tick.get("exchange_timestamp") or tick.get("timestamp") or datetime.now(MARKET_TZ)
-        volume = tick.get("volume", 0)
+        try:
+            volume = float(tick.get("volume_traded", tick.get("volume", 0)))
+        except (TypeError, ValueError):
+            return set()
+        if not math.isfinite(volume) or volume < 0:
+            return set()
 
         # Strip timezone if present
         tick_time = market_datetime(tick_time)
@@ -255,6 +266,8 @@ class SymbolData:
                 vwap = float(ltp)
             
             # Check if we should start a new candle or update current one
+            opening = tick_time.replace(hour=9, minute=15, second=0, microsecond=0)
+            initial_volume = 0 if iv == '1d' or bucket_time == opening else volume
             if not self.candles[iv]:
                 # First candle
                 new_candle = {
@@ -263,8 +276,8 @@ class SymbolData:
                     'high': ltp,
                     'low': ltp,
                     'close': ltp,
-                    'volume': 0,
-                    'cumulative_volume_start': volume,
+                    'volume': max(0, volume - initial_volume),
+                    'cumulative_volume_start': initial_volume,
                     'cumulative_volume_end': volume,
                     'vwap': vwap
                 }
@@ -273,7 +286,10 @@ class SymbolData:
             elif bucket_time > self.last_tick_time[iv]:
                 rolled_intervals.add(iv)
                 # Close the current candle and open a new one
-                start_volume = self.candles[iv][-1]['cumulative_volume_end']
+                if same_session:
+                    start_volume = self.candles[iv][-1]['cumulative_volume_end']
+                else:
+                    start_volume = initial_volume
                 
                 new_candle = {
                     'time': bucket_time,
