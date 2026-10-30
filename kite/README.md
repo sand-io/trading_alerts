@@ -39,12 +39,12 @@ graph TD
 5. **Grouped Condition Evaluation:** 
    * Every incoming tick updates candle OHLC and volume on the ingestion worker. Live chart events are published at most once per second per symbol (and immediately at candle rollover).
    * A separate worker evaluates all valid JSON strategies against shared private candle snapshots. Only the active strategy sends alerts. Provisional evaluations for the same symbol/candle are combined; final snapshots from earlier candles are retained. The rule panel displays the evaluation timestamp separately from the latest market update.
-   * Desktop alerts are suppressed for evaluations more than ten seconds behind exchange time. The health endpoint reports pending tick batches and evaluations for monitoring processing load.
+   * Desktop alerts are sent only from confirmed candle states and are suppressed more than 30 seconds after candle close by default. The health endpoint reports pending tick batches and evaluations for monitoring processing load.
    * It counts the percentage of rules that evaluate to `True`.
 6. **Threshold-Based Alerts:** 
    * The scanner loads `threshold` (e.g. `70` for 70%) from the active strategy JSON.
-   * If the percentage of passing conditions $\ge$ `threshold`, it triggers a grouped alert.
-   * The alert lists exactly which conditions passed and the stock's current price.
+   * When the configured confirmation candle closes, a passing percentage $\ge$ `threshold` triggers a grouped alert from the same frozen state used for its chart marker.
+   * The alert lists exactly which conditions passed and the candle's final observed price. Forming-candle matches update the rule panel but never send alerts.
 7. **Cooldown Filter:** The notifier applies a cooldown (e.g., 5 minutes) using a stable `cooldown_key` so that flickering condition counts do not cause alert spam. Desktop notifications use Notification Center on macOS, Windows notifications on Windows, and `notify-send`/libnotify on Linux; terminal output remains available when desktop notifications are unavailable.
 8. **Dynamic Configuration Reload:** Every 5 seconds on incoming ticks, the scanner checks all strategy JSON profiles for changes. If files have changed, it reloads the conditions and its threshold on-the-fly without interrupting the live WebSocket connection.
 
@@ -226,11 +226,11 @@ The dashboard also supports a 3-minute chart with EMA 20/50 and optional VWAP, u
 ### Saved session review (SQLite)
 
 The scanner now records live rule evaluations for every loaded valid strategy
-(normally every five seconds per symbol), alerts accepted by the notifier after cooldown, and confirmed 5-minute
+(normally every five seconds per symbol), alerts accepted by the notifier after cooldown, and confirmed strategy-timeframe
 candle states in `kite/data/history.sqlite3`. Each evaluation saves its rule texts,
 pass/fail results, price, live VWAP, exchange timestamp, candle, and configured
-threshold. Alerts and confirmed candle marks are separate: an intrabar alert can
-fire without a directional signal at candle close. Desktop delivery can still fail
+threshold. Alerts use the same frozen result as confirmed candle marks. Cooldown and freshness
+filters can suppress notifications for a qualifying chart mark; intrabar matches never notify. Desktop delivery can still fail
 while a notifier alert is recorded.
 
 Restart the application to enable recording. Select a symbol, choose **Review
@@ -414,7 +414,7 @@ confirmation intervals `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `4h`, and `1d`.
 Each condition keeps its own calculation timeframe; marks are visible in the
 dashboard when their confirmation interval has a matching chart tab.
 
-Live scores and alerts can change while a candle forms. Confirmed marks use the
+Live scores can change while a candle forms. Alerts and confirmed marks use the
 last evaluated state before the confirmation candle rolls over; the final observed
 candle is finalized at the normal 15:30 session close after queued ticks and
 evaluations finish. The final evaluation includes the last ingested tick, even
@@ -474,6 +474,11 @@ later ticks and strategy edits cannot change them. Shutdown drains received tick
 and evaluations before stopping recording workers, with bounded waits and an
 explicit warning if work remains. An abrupt process kill can lose queued work.
 
-Alerts accept evaluations up to 30 seconds after their exchange timestamp by
-default. Set `alert_max_age_seconds` in `kite/config.json` to change this guard.
+Alerts accept confirmed results up to 30 seconds after the confirmation candle closes by
+default (including the shortened final session candle). Set `alert_max_age_seconds` in `kite/config.json` to change this guard.
 Older queued results remain recorded for review but never generate delayed alerts.
+
+Candle-close alerts are emitted on the first subsequent bucket tick, or by the
+session finalizer at 15:30 IST. The final pre-rollover snapshot includes ticks
+skipped by evaluation throttling. Higher-timeframe rule inputs remain current/forming;
+closing a 5-minute confirmation candle does not wait for hourly or daily inputs to close.
