@@ -80,10 +80,15 @@ class HistoryTests(unittest.TestCase):
             data.candles['5m'] = [{'time': candle_time, 'open': 100, 'high': 101,
                                   'low': 99, 'close': 100, 'volume': 10, 'vwap': 100}]
             scanner.symbol_data = {1: data}
-            with patch('scanner.notifier.send_alert', side_effect=[True, False]):
+            with patch('scanner.notifier.send_alert', side_effect=[True, False]) as notify, \
+                 patch('scanner.datetime', wraps=datetime) as clock:
+                clock.now.return_value = candle_time.replace(hour=15, minute=30, tzinfo=MARKET_TZ)
                 scanner._evaluate_snapshot(data, 100, 100, stamp)
                 scanner._evaluate_snapshot(data, 100, 100, stamp)
-            scanner.finalize_session(candle_time.replace(hour=15, minute=31))
+                notify.assert_not_called()
+                scanner.finalize_session(candle_time.replace(hour=15, minute=30))
+                scanner.finalize_session(candle_time.replace(hour=15, minute=31))
+                notify.assert_called_once()
             day = candle_time.date().isoformat()
             self.assertEqual(len(scanner.history.events(1, day, 'evaluation')), 2)
             self.assertEqual(len(scanner.history.events(1, day, 'alert')), 1)
