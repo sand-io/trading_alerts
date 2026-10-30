@@ -28,7 +28,11 @@ class AllStrategyRecordingTests(unittest.TestCase):
         self.scanner.config = {}
         self.scanner.event_callback = Mock()
         self.stamp = datetime.now(MARKET_TZ).replace(tzinfo=None, second=0, microsecond=0)
-        self.stamp = self.stamp.replace(minute=self.stamp.minute // 5 * 5)
+        self.stamp = self.stamp.replace(hour=10, minute=0)
+        clock = patch('scanner.datetime', wraps=datetime)
+        self.clock = clock.start()
+        self.addCleanup(clock.stop)
+        self.clock.now.side_effect = lambda tz=None: self.stamp.replace(tzinfo=tz) + timedelta(seconds=1)
         data = SymbolData(1, 'NSE:TEST')
         for interval, minutes in [('3m', 3), ('5m', 5), ('15m', 15), ('1h', 60), ('1d', 1440)]:
             data.intervals.add(interval)
@@ -50,17 +54,20 @@ class AllStrategyRecordingTests(unittest.TestCase):
     def test_all_profiles_record_and_only_active_profile_alerts_and_publishes(self):
         with patch('scanner.notifier.send_alert', return_value=True) as notify:
             event = self.evaluate()
+            notify.assert_not_called()
+            self.rollover()
+            event = self.evaluate()
             self.assertEqual(notify.call_count, 1)
             self.assertIn('default:', notify.call_args.kwargs['cooldown_key'])
         store = self.scanner.history
         for identifier in ('default', 'second'):
             events = store.events(1, self.day, 'evaluation', identifier)
-            self.assertEqual(len(events), 1)
+            self.assertEqual(len(events), 2)
             self.assertTrue(events[0]['bullish']['triggered'])
             self.assertEqual(events[0]['alerts_enabled'], identifier == 'default')
         self.assertEqual(event['strategy_id'], 'default')
         self.assertEqual(len(store.events(1, self.day, 'alert')), 1)
-        self.scanner.event_callback.assert_called_once()
+        self.assertEqual(self.scanner.event_callback.call_count, 2)
         self.assertEqual(self.scanner.event_callback.call_args.args[0]['strategy_id'], 'default')
 
     def test_active_alert_precedes_coalesced_chart_archive(self):
@@ -68,6 +75,9 @@ class AllStrategyRecordingTests(unittest.TestCase):
         self.scanner._archive_worker.is_alive.return_value = True
         with patch('scanner.notifier.send_alert', return_value=True) as notify, \
              patch.object(self.scanner, '_archive_charts') as archive:
+            self.evaluate()
+            notify.assert_not_called()
+            self.rollover()
             self.evaluate()
         notify.assert_called_once()
         archive.assert_not_called()
@@ -100,15 +110,16 @@ class AllStrategyRecordingTests(unittest.TestCase):
             try:
                 self.evaluate()
                 self.assertTrue(entered.wait(2))
+                self.rollover()
                 self.evaluate()
-                self.assertEqual(notify.call_count, 2)
+                self.assertEqual(notify.call_count, 1)
                 self.assertEqual(self.scanner.event_callback.call_count, 2)
                 self.assertGreater(self.scanner._history_queue.unfinished_tasks, 0)
             finally:
                 release.set()
                 self.assertTrue(self.scanner.flush_background())
         self.assertEqual(len(self.scanner.history.events(1, self.day, 'evaluation')), 4)
-        self.assertEqual(len(self.scanner.history.events(1, self.day, 'alert')), 2)
+        self.assertEqual(len(self.scanner.history.events(1, self.day, 'alert')), 1)
 
     def test_queued_archive_captures_candles_and_strategy_versions(self):
         self.scanner._archive_worker = Mock()
@@ -197,7 +208,8 @@ class AllStrategyRecordingTests(unittest.TestCase):
         self.assertIs(self.scanner.strategy_states['default'], original_state)
         self.assertEqual(len(self.scanner.confirmed_signals[1]), 2)
         self.assertEqual({item['id'] for item in reopened.session_strategies(1, self.day)}, {'default', 'second'})
-        self.assertEqual([event['strategy_id'] for event in reopened.events(1, self.day, 'alert')], ['default', 'second'])
+        # Neither an inactive strategy nor its earlier recording-only state may alert.
+        self.assertEqual(reopened.events(1, self.day, 'alert'), [])
 
     def test_queued_work_survives_switch_but_cannot_send_stale_alerts(self):
         self.scanner._queue_evaluation(self.data, 100, 99, datetime.now(MARKET_TZ).replace(tzinfo=None))
@@ -281,8 +293,7 @@ class AllStrategyRecordingTests(unittest.TestCase):
             stamp = datetime.now(MARKET_TZ).replace(tzinfo=None)
             cold = self.scanner._evaluate_all_snapshot(self.data, 100, 99, stamp)
             ready = self.scanner._evaluate_all_snapshot(healthy, 100, 99, stamp)
-            notify.assert_called_once()
-            self.assertEqual(notify.call_args.args[0], 'NSE:HEALTHY')
+            notify.assert_not_called()
         self.assertEqual(cold['missing_timeframes'], ['1h'])
         self.assertFalse(cold['data_ready'])
         self.assertEqual(cold['bullish']['percentage'], 50)
@@ -297,4 +308,4 @@ class AllStrategyRecordingTests(unittest.TestCase):
             warmed = self.scanner._evaluate_all_snapshot(self.data, 100, 99, stamp)
             self.assertTrue(warmed['data_ready'])
             self.assertTrue(warmed['bullish']['triggered'])
-            notify.assert_called_once()
+            notify.assert_not_called()
