@@ -735,7 +735,7 @@ class RealtimeScanner:
         sd.check_and_add_intervals(self.kite, required_intervals)
         
         # Add tick to compile OHLC candles
-        if defer_evaluation and latest is not None:
+        if latest is not None:
             # Preserve the final pre-rollover snapshot for every profile, including
             # boundaries (such as 09:18 on 3m) that do not coincide with 5m.
             rolling = any(rows and sd._get_bucket_time(tick_time, iv) > rows[-1]['time']
@@ -743,8 +743,12 @@ class RealtimeScanner:
             if rolling:
                 previous = sd.candles.get('5m', [])
                 price = previous[-1]['close'] if previous else tick['last_price']
-                self._queue_evaluation(sd, price, sd.get_latest_vwap('5m', price),
-                                       getattr(sd, '_latest_exchange_time', tick_time))
+                previous_time = getattr(sd, '_latest_exchange_time', tick_time)
+                previous_vwap = sd.get_latest_vwap('5m', price)
+                if defer_evaluation:
+                    self._queue_evaluation(sd, price, previous_vwap, previous_time)
+                else:
+                    self._evaluate_all_snapshot(sd, price, previous_vwap, previous_time)
         rolled_intervals = sd.add_tick(tick)
         if defer_evaluation:
             now = time.monotonic()
@@ -859,41 +863,9 @@ class RealtimeScanner:
         event['alerts_enabled'] = bool(alert)
         latest[token] = event
         history = getattr(self, 'history', None)
-
-        # Notify before any SQLite/chart checkpoint work. With hundreds of
-        # symbols, persistence latency must never make a fresh match go stale.
-        evaluation_lag = max(0., (datetime.now(MARKET_TZ).replace(tzinfo=None) - tick_time).total_seconds())
         if alert:
-            self._last_evaluation_lag_seconds = evaluation_lag
-        max_alert_age = float(getattr(self, 'config', {}).get('alert_max_age_seconds', 30))
-        for result, is_bullish, key in (
-            (bullish, True, "bullish_block"),
-            (bearish, False, "bearish_block"),
-        ):
-            if alert and result.triggered and evaluation_lag <= max_alert_age:
-                passed_text = "\n     • ".join(rule.text for rule in result.rules if rule.passed)
-                condition_str = (
-                    f"{result.percentage:.1f}% conditions passed "
-                    f"({result.passed}/{result.total}):\n     • {passed_text}"
-                )
-                if profile:
-                    key = f"{profile['id']}:{profile['version']}:{key}"
-                    cooldown = profile.get('cooldown_seconds')
-                    notifier.cooldown_seconds = cooldown if cooldown is not None else self.config.get('cooldown_seconds', 300)
-                    condition_str = f"[{profile['name']}] {condition_str}"
-                sent = notifier.send_alert(sd.symbol, is_bullish=is_bullish,
-                                    condition_str=condition_str, price=ltp,
-                                    cooldown_key=key)
-                if sent and history:
-                    self._record_history("alert", {**event, "alert_side": result.side})
-
-        if history:
-            self._record_history('evaluation', event)
-            # Chart building and large JSON writes are coalesced by symbol on a
-            # dedicated worker. Event rows remain exact and ordered here.
-            archive_key = (token, confirmation)
-            if event.get('candle') and self._archived_chart_candles.get(archive_key) != event['candle']['time']:
-                self._schedule_chart_archive(sd, event, archive_key)
+            self._last_evaluation_lag_seconds = max(
+                0., (datetime.now(MARKET_TZ).replace(tzinfo=None) - tick_time).total_seconds())
 
         # Freeze the last live state as the signal for the candle that just closed.
         confirmed_signal = None
@@ -903,7 +875,17 @@ class RealtimeScanner:
                 prior.get('strategy_version') == event.get('strategy_version') and
                 prior['candle']['time'] < event['candle']['time']):
             confirmed_signal = self._confirm_once(token, prior, state)
+        if confirmed_signal and alert:
+            self._notify_confirmed(confirmed_signal, profile)
         event["confirmed_signal"] = confirmed_signal
+
+        if history:
+            self._record_history('evaluation', event)
+            # Chart building and large JSON writes are coalesced by symbol on a
+            # dedicated worker. Event rows remain exact and ordered here.
+            archive_key = (token, confirmation)
+            if event.get('candle') and self._archived_chart_candles.get(archive_key) != event['candle']['time']:
+                self._schedule_chart_archive(sd, event, archive_key)
 
         priors[token] = event
 
@@ -1042,6 +1024,47 @@ class RealtimeScanner:
                 self._archive_inflight = False
                 self._archive_condition.notify_all()
 
+    def _notify_confirmed(self, signal, profile=None):
+        """Notify from the exact frozen chart state, never from a forming candle."""
+        if not signal.get('alerts_enabled') or signal.get('data_ready') is False:
+            return
+        if getattr(getattr(self, '_stop_requested', None), 'is_set', lambda: False)():
+            return
+        if profile and (signal.get('strategy_id') != profile['id'] or
+                        signal.get('strategy_version') != profile['version']):
+            return
+        start = datetime.fromtimestamp(signal['candle']['time'], MARKET_TZ)
+        timeframe = signal.get('confirmation_timeframe', '5m')
+        minutes = {'1m': 1, '3m': 3, '5m': 5, '15m': 15, '30m': 30,
+                   '1h': 60, '4h': 240, '1d': 1440}[timeframe]
+        session_end = start.replace(hour=15, minute=30, second=0, microsecond=0)
+        close_time = min(start + timedelta(minutes=minutes), session_end)
+        now = datetime.now(MARKET_TZ)
+        lag = (now - close_time).total_seconds()
+        # Age is measured from candle close, not its last trade: sparse contracts
+        # and daily candles can legitimately have an older last tick.
+        if lag < 0 or lag > float(getattr(self, 'config', {}).get('alert_max_age_seconds', 30)):
+            return
+        for side, is_bullish, key in (('bullish', True, 'bullish_block'),
+                                      ('bearish', False, 'bearish_block')):
+            result = signal[side]
+            if not result['triggered']:
+                continue
+            passed_text = "\n     • ".join(rule['text'] for rule in result['rules'] if rule['passed'])
+            condition_str = (f"{result['percentage']:.1f}% conditions passed "
+                             f"({result['passed']}/{result['total']}):\n     • {passed_text}")
+            if profile:
+                key = f"{profile['id']}:{profile['version']}:{key}"
+                cooldown = profile.get('cooldown_seconds')
+                notifier.cooldown_seconds = (cooldown if cooldown is not None else
+                                             self.config.get('cooldown_seconds', 300))
+                condition_str = f"[{profile['name']}] {condition_str}"
+            if notifier.send_alert(signal['symbol'], is_bullish=is_bullish,
+                                   condition_str=condition_str, price=signal['price'], cooldown_key=key):
+                if getattr(self, 'history', None):
+                    self._record_history('alert', {**signal, 'alert_side': side,
+                                                  'confirmed_at': close_time.isoformat()})
+
     def _confirm_once(self, token, prior, state=None):
         if not prior or not prior.get('candle'):
             return None
@@ -1092,11 +1115,19 @@ class RealtimeScanner:
                 continue
             price = rows[-1]['close']
             vwap = snapshot.get_latest_vwap('5m', price)
+            # Refresh the final rules without turning recording-only or stale
+            # strategy work into notification-eligible observations.
+            prior_states = ([self._profile_state(profile)['prior'] for profile in stale_profiles]
+                            if stale_profiles else [getattr(self, '_prior_results', {})])
+            eligibility = [priors.get(token, {}).get('alerts_enabled', False) for priors in prior_states]
             if stale_profiles:
                 self._evaluate_all_snapshot(snapshot, price, vwap, stamp,
                                             profiles=stale_profiles, allow_alerts=False)
             else:
                 self._evaluate_snapshot(snapshot, price, vwap, stamp, alert=False)
+            for priors, enabled in zip(prior_states, eligibility):
+                if token in priors:
+                    priors[token]['alerts_enabled'] = enabled
             self._session_close_checked[token] = stamp
 
     def finalize_session(self, now=None):
@@ -1123,13 +1154,15 @@ class RealtimeScanner:
                 if now < end:
                     continue
                 signal = self._confirm_once(token, prior, state)
+                active = (not hasattr(self, 'active_strategy') or
+                          (prior.get('strategy_id') == self.active_strategy['id'] and
+                           prior.get('strategy_version') == self.active_strategy['version']))
+                if signal and active:
+                    self._notify_confirmed(signal, getattr(self, 'active_strategy', None))
                 if signal and token not in archived and getattr(self, 'history', None):
                     confirmation = prior.get('confirmation_timeframe', '5m')
                     self._schedule_chart_archive(self.symbol_data[token], prior, (token, confirmation))
                     archived.add(token)
-                active = (not hasattr(self, 'active_strategy') or
-                          (prior.get('strategy_id') == self.active_strategy['id'] and
-                           prior.get('strategy_version') == self.active_strategy['version']))
                 if signal and active and self.event_callback:
                     self.event_callback({**prior, 'confirmed_signal': signal})
 
