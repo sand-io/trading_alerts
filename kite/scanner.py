@@ -428,6 +428,7 @@ class RealtimeScanner:
         self.latest_results = {}
         self.confirmed_signals = {}
         self._process_lock = threading.RLock()
+        self._retention_lock = threading.Lock()
         self._finalized_candles = {}
         self.connection_status = "initializing"
         self.connection_error = None
@@ -1301,17 +1302,26 @@ class RealtimeScanner:
 
     def maintain_history(self, now=None):
         now = market_datetime(now or datetime.now(MARKET_TZ))
-        if getattr(self, '_retention_day', None) == now.date():
+        # Startup and the dashboard finalizer can arrive here simultaneously.
+        # A large DELETE may exceed SQLite's busy timeout; skip overlapping
+        # maintenance rather than starting a second writer against the same DB.
+        lock = self.__dict__.setdefault('_retention_lock', threading.Lock())
+        if not lock.acquire(blocking=False):
             return
         try:
-            if getattr(self, 'history', None):
-                self.history.prune(now)
-            if history_requests.persistent_cache:
-                history_requests.persistent_cache.prune(now)
-        except Exception:
-            strategy_log.exception('History retention cleanup failed; will retry')
-            return
-        self._retention_day = now.date()
+            if getattr(self, '_retention_day', None) == now.date():
+                return
+            try:
+                if getattr(self, 'history', None):
+                    self.history.prune(now)
+                if history_requests.persistent_cache:
+                    history_requests.persistent_cache.prune(now)
+            except Exception:
+                strategy_log.exception('History retention cleanup failed; will retry')
+                return
+            self._retention_day = now.date()
+        finally:
+            lock.release()
 
     def run(self, threaded=False):
         if self._stop_requested.is_set():
